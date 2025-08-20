@@ -98,16 +98,29 @@ class Auto_Login_After_Checkout {
             } elseif (is_string($posted_data) && strpos($posted_data, '=') !== false) {
                 parse_str($posted_data, $pd_array);
             }
+            
+            // Try different field name variations from posted data
             if (empty($id_number) && !empty($pd_array['billing_id_number'])) {
                 $id_number = sanitize_text_field($pd_array['billing_id_number']);
             }
+            if (empty($id_number) && !empty($pd_array['id_number'])) {
+                $id_number = sanitize_text_field($pd_array['id_number']);
+            }
+            
             // If still empty, try from superglobal
             if (empty($id_number) && !empty($_POST['billing_id_number'])) {
                 $id_number = sanitize_text_field(wp_unslash($_POST['billing_id_number']));
             }
+            if (empty($id_number) && !empty($_POST['id_number'])) {
+                $id_number = sanitize_text_field(wp_unslash($_POST['id_number']));
+            }
+            
             // Also try non-underscored post meta as a fallback
             if (empty($id_number)) {
                 $id_number = get_post_meta($order->get_id(), 'billing_id_number', true);
+            }
+            if (empty($id_number)) {
+                $id_number = get_post_meta($order->get_id(), 'id_number', true);
             }
             
             error_log('Phone: ' . $phone);
@@ -145,11 +158,16 @@ class Auto_Login_After_Checkout {
                 error_log("AUTO LOGIN: Found existing user ID: " . $user->ID);
             }
             
-            // Store user ID in order meta for later login
+            // Actually log the user in
+            wp_set_current_user($user->ID);
+            wp_set_auth_cookie($user->ID, true);
+            do_action('wp_login', $user->user_login, $user);
+            
+            // Store user ID in order meta for reference
             $order->update_meta_data('_auto_login_user_id', $user->ID);
             $order->save();
-            error_log('AUTO LOGIN: Stored user ID in order meta: ' . $user->ID);
             
+            error_log('AUTO LOGIN: User logged in successfully - ID: ' . $user->ID . ', Username: ' . $user->user_login);
             error_log('=== AUTO LOGIN: Checkout handling complete ===');
             
         } catch (Exception $e) {
@@ -163,15 +181,28 @@ class Auto_Login_After_Checkout {
     public function persist_custom_checkout_meta($order, $data) {
         try {
             $id_number = '';
+            
+            // Try multiple field name variations
             if (is_array($data) && !empty($data['billing_id_number'])) {
                 $id_number = sanitize_text_field($data['billing_id_number']);
+            } elseif (is_array($data) && !empty($data['id_number'])) {
+                $id_number = sanitize_text_field($data['id_number']);
             } elseif (!empty($_POST['billing_id_number'])) {
                 $id_number = sanitize_text_field(wp_unslash($_POST['billing_id_number']));
+            } elseif (!empty($_POST['id_number'])) {
+                $id_number = sanitize_text_field(wp_unslash($_POST['id_number']));
             }
+            
             if (!empty($id_number)) {
                 $order->update_meta_data('_billing_id_number', $id_number);
+                $order->update_meta_data('_id_number', $id_number);
                 // WooCommerce saves the order after this hook
-                error_log('Persisted _billing_id_number during order creation');
+                error_log('Persisted ID number during order creation: ' . $id_number);
+            } else {
+                error_log('AUTO LOGIN: No ID number found in checkout data');
+                if (is_array($data)) {
+                    error_log('Available data keys: ' . implode(', ', array_keys($data)));
+                }
             }
         } catch (Exception $e) {
             error_log('AUTO LOGIN: persist_custom_checkout_meta error: ' . $e->getMessage());
