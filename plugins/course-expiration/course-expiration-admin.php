@@ -57,9 +57,9 @@ class Course_Expiration_Admin {
                                     <select name="user_id" id="user_id" required style="width: 100%;">
                                         <option value="">Choose a student...</option>
                                         <?php
-                                        $users = get_users(['orderby' => 'display_name', 'order' => 'ASC']);
+                                        $users = get_users(['orderby' => 'ID', 'order' => 'DESC']);
                                         foreach ($users as $user) {
-                                            echo '<option value="' . esc_attr($user->ID) . '">' . esc_html($user->display_name) . ' (' . esc_html($user->user_login) . ')</option>';
+                                            echo '<option value="' . esc_attr($user->ID) . '">' . esc_html($user->display_name) . ' (ID: ' . $user->ID . ', Login: ' . esc_html($user->user_login) . ')</option>';
                                         }
                                         ?>
                                     </select>
