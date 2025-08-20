@@ -14,7 +14,9 @@
   },
   "autoload": {
     "psr-4": {
-      "Project\\MU\\": "src/"
+      "Project\\MU\\": "src/",
+      "Lilac\\LearnDashQuizCategories\\": "plugins/learndash-quiz-categories/src/",
+      "Lilac\\CourseAccess\\": "plugins/lilac-course-access/src/"
     },
     "files": [
       "src/Core/Helpers.php"

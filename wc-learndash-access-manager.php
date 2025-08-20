@@ -857,6 +857,13 @@ class WC_LearnDash_Access_Manager {
         error_log('WC LearnDash: Single enrollment started for order ' . $order_id);
         
         // Get order and process enrollment directly
+        $this->process_order_enrollment($order_id);
+    }
+    
+    /**
+     * Process order enrollment
+     */
+    private function process_order_enrollment($order_id) {
         $order = wc_get_order($order_id);
         if (!$order) {
             error_log('WC LearnDash: Invalid order ID: ' . $order_id);

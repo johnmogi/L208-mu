@@ -15,6 +15,11 @@ class ComposerStaticInit559dde2816daf3b5901679fd02811060
         array (
             'Project\\MU\\' => 11,
         ),
+        'L' => 
+        array (
+            'Lilac\\LearnDashQuizCategories\\' => 30,
+            'Lilac\\CourseAccess\\' => 19,
+        ),
     );
 
     public static $prefixDirsPsr4 = array (
@@ -22,10 +27,23 @@ class ComposerStaticInit559dde2816daf3b5901679fd02811060
         array (
             0 => __DIR__ . '/../..' . '/src',
         ),
+        'Lilac\\LearnDashQuizCategories\\' => 
+        array (
+            0 => __DIR__ . '/../..' . '/plugins/learndash-quiz-categories/src',
+        ),
+        'Lilac\\CourseAccess\\' => 
+        array (
+            0 => __DIR__ . '/../..' . '/plugins/lilac-course-access/src',
+        ),
     );
 
     public static $classMap = array (
         'Composer\\InstalledVersions' => __DIR__ . '/..' . '/composer/InstalledVersions.php',
+        'Lilac\\CourseAccess\\Admin\\AdminPage' => __DIR__ . '/../..' . '/plugins/lilac-course-access/src/Admin/AdminPage.php',
+        'Lilac\\CourseAccess\\Core\\AccessManager' => __DIR__ . '/../..' . '/plugins/lilac-course-access/src/Core/AccessManager.php',
+        'Lilac\\CourseAccess\\Integrations\\LearnDash' => __DIR__ . '/../..' . '/plugins/lilac-course-access/src/Integrations/LearnDash.php',
+        'Lilac\\CourseAccess\\Integrations\\WooCommerce' => __DIR__ . '/../..' . '/plugins/lilac-course-access/src/Integrations/WooCommerce.php',
+        'Lilac\\CourseAccess\\Plugin' => __DIR__ . '/../..' . '/plugins/lilac-course-access/src/Plugin.php',
         'Project\\MU\\Features\\CustomLogin' => __DIR__ . '/../..' . '/src/Features/CustomLogin.php',
     );
 

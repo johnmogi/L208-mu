@@ -3,6 +3,7 @@
 namespace Lilac\CourseAccess\Admin;
 
 use Lilac\CourseAccess\Core\AccessManager;
+use Lilac\CourseAccess\Integrations\WooCommerce;
 
 /**
  * Admin Page Handler

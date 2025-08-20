@@ -7,4 +7,6 @@ $baseDir = dirname($vendorDir);
 
 return array(
     'Project\\MU\\' => array($baseDir . '/src'),
+    'Lilac\\LearnDashQuizCategories\\' => array($baseDir . '/plugins/learndash-quiz-categories/src'),
+    'Lilac\\CourseAccess\\' => array($baseDir . '/plugins/lilac-course-access/src'),
 );
