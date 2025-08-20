@@ -1,0 +1,1734 @@
+<?php
+/**
+ * Plugin Name: WC LearnDash Access Manager
+ * Description: Manages course access for WooCommerce purchases with LearnDash integration
+ * Version: 2.1.0
+ * Author: Lilac Learning
+ */
+
+// Prevent direct access
+if (!defined('ABSPATH')) {
+    exit;
+}
+
+class WC_LearnDash_Access_Manager {
+    
+    private $access_options = [
+        'paused_2weeks' => 'מנוי מושהה (גישה ל-2 שבועות לאחר הפעלה)',
+        'trial_2weeks' => 'ניסיון 2 שבועות',
+        'access_1month' => 'גישה לחודש',
+        'access_60days' => 'גישה ל-60 יום',
+        'access_1year' => 'גישה לשנה'
+    ];
+    
+    private $expired_course_id;
+    private $expired_user_id;
+    
+    public function __construct() {
+        // Add fatal error monitoring
+        register_shutdown_function(array($this, 'check_fatal_error'));
+        
+        add_action('plugins_loaded', [$this, 'init']);
+        add_action('admin_enqueue_scripts', [$this, 'admin_scripts']);
+        
+        // Ensure database table exists
+        add_action('plugins_loaded', [$this, 'maybe_create_subscription_table']);
+        
+        // Add AJAX handlers for course expiry editing
+        add_action('wp_ajax_update_course_expiry', [$this, 'ajax_update_course_expiry']);
+        add_action('wp_ajax_nopriv_update_course_expiry', [$this, 'ajax_update_course_expiry']);
+        add_action('wp_ajax_quick_set_course_expiry', array($this, 'ajax_quick_set_course_expiry'));
+        add_action('wp_ajax_get_user_course_data', array($this, 'ajax_get_user_course_data'));
+        add_action('wp_ajax_toggle_course_access', array($this, 'ajax_toggle_course_access'));
+        add_action('wp_ajax_get_simple_course_status', array($this, 'ajax_get_simple_course_status'));
+        
+        error_log('WC_LearnDash_Access_Manager initialized - Memory: ' . round(memory_get_usage(true) / 1024 / 1024, 2) . 'MB');
+    }
+    
+    /**
+     * Check for fatal errors that might cause 502
+     */
+    public function check_fatal_error() {
+        $error = error_get_last();
+        if ($error && in_array($error['type'], [E_ERROR, E_CORE_ERROR, E_COMPILE_ERROR, E_RECOVERABLE_ERROR])) {
+            error_log('WC LearnDash FATAL ERROR: ' . $error['message'] . ' in ' . $error['file'] . ' on line ' . $error['line']);
+            error_log('Memory usage at fatal error: ' . round(memory_get_usage(true) / 1024 / 1024, 2) . 'MB');
+            error_log('Peak memory usage: ' . round(memory_get_peak_usage(true) / 1024 / 1024, 2) . 'MB');
+        }
+    }
+    
+    public function init() {
+        // Check if WooCommerce is active
+        if (!class_exists('WooCommerce')) {
+            add_action('admin_notices', [$this, 'woocommerce_missing_notice']);
+            return;
+        }
+        
+        // Use lower priority to avoid interfering with checkout process
+        add_action('woocommerce_payment_complete', array($this, 'enroll_user_in_courses_once'), 20, 1);
+        
+        // Add product fields
+        add_action('woocommerce_product_options_general_product_data', [$this, 'add_custom_fields']);
+        add_action('woocommerce_process_product_meta', [$this, 'save_custom_fields']);
+        
+        // Remove duplicate hooks that cause multiple processing
+        // add_action('woocommerce_order_status_completed', [$this, 'handle_order_completion']);
+        // add_action('woocommerce_payment_complete', [$this, 'handle_payment_completion']);
+        
+        // Handle post-purchase redirection
+        add_action('woocommerce_thankyou', [$this, 'handle_post_purchase_redirect'], 10, 1);
+        
+        // Add custom columns to product list
+        add_filter('manage_edit-product_columns', [$this, 'add_product_columns']);
+        add_action('manage_product_posts_custom_column', [$this, 'show_product_columns'], 10, 2);
+        
+        // Add order meta display
+        add_action('woocommerce_admin_order_data_after_billing_address', [$this, 'display_order_access_info']);
+        
+        // Add user profile fields
+        add_action('show_user_profile', [$this, 'show_user_access_fields']);
+        add_action('edit_user_profile', [$this, 'show_user_access_fields']);
+        
+        // Add course access control hooks
+        add_filter('learndash_user_can_bypass_course_limits', [$this, 'check_course_access_limits'], 10, 4);
+        add_filter('learndash_content', [$this, 'filter_course_content'], 10, 2);
+        
+        // Additional access control hooks
+        add_filter('sfwd_lms_has_access', [$this, 'filter_course_access'], 10, 3);
+        add_action('template_redirect', [$this, 'redirect_expired_course_access'], 5);
+        
+        // Block LearnDash course access at multiple levels
+        add_filter('learndash_user_has_course_access', [$this, 'check_user_course_access'], 10, 3);
+        add_filter('learndash_course_access_from', [$this, 'filter_course_access_from'], 10, 3);
+        add_filter('learndash_lesson_access_from', [$this, 'filter_lesson_access'], 10, 4);
+        add_filter('learndash_topic_access_from', [$this, 'filter_topic_access'], 10, 4);
+        add_filter('learndash_quiz_access_from', [$this, 'filter_quiz_access'], 10, 4);
+        
+        // Debug action to verify plugin is loading
+        add_action('admin_init', [$this, 'debug_plugin_loaded']);
+    }
+    
+    public function debug_plugin_loaded() {
+        if (isset($_GET['debug_wc_learndash']) && current_user_can('manage_options')) {
+            error_log('WC LearnDash Access Manager: Plugin loaded successfully');
+            wp_die('Plugin is loaded! Check error log for confirmation.');
+        }
+    }
+    
+    /**
+     * Check course access on template load
+     */
+    public function check_course_access_on_load() {
+        if (!is_singular('sfwd-courses')) {
+            return;
+        }
+        
+        $course_id = get_the_ID();
+        $user_id = get_current_user_id();
+        
+        error_log("WC LearnDash Debug: Checking access for Course ID: $course_id, User ID: $user_id");
+        
+        // Check if course is set to 'Open' - if so, allow access regardless of other restrictions
+        if ($this->is_course_open($course_id)) {
+            error_log("WC LearnDash Debug: Course $course_id is set to 'Open' - allowing unrestricted access");
+            return;
+        }
+        
+        // For non-logged-in users, show purchase incentive
+        if (!$user_id) {
+            error_log("WC LearnDash Debug: Non-logged-in user - showing purchase incentive");
+            add_action('wp_head', [$this, 'add_expired_course_styles']);
+            add_action('wp_footer', [$this, 'inject_purchase_notice_javascript']);
+            $this->expired_course_id = $course_id;
+            $this->expired_user_id = 0;
+            return;
+        }
+        
+        // Check if user is enrolled in the course via LearnDash
+        if (function_exists('learndash_user_get_enrolled_courses')) {
+            $user_courses = learndash_user_get_enrolled_courses($user_id);
+            if (in_array($course_id, $user_courses)) {
+                error_log("WC LearnDash Debug: User $user_id is enrolled in course $course_id via LearnDash - allowing access");
+                return; // User is enrolled, allow access
+            }
+        }
+        
+        // Check for recent purchase (grace period)
+        $recent_purchase_time = get_user_meta($user_id, 'lilac_recent_purchase_time', true);
+        if ($recent_purchase_time) {
+            $grace_period = 10 * 60; // 10 minutes
+            if ((current_time('timestamp') - $recent_purchase_time) < $grace_period) {
+                error_log("WC LearnDash Debug: User $user_id within grace period after recent purchase - allowing access");
+                return; // Within grace period, allow access
+            }
+        }
+        
+        // For logged-in users, check expiration
+        $expire_key = "course_{$course_id}_access_expires";
+        $expires = get_user_meta($user_id, $expire_key, true);
+        
+        error_log("WC LearnDash Debug: Expiration timestamp for user $user_id, course $course_id: " . ($expires ?: 'none'));
+        
+        if (!$expires) {
+            error_log("WC LearnDash Debug: No custom expiration set - allowing access");
+            return; // No custom expiration set, allow access
+        }
+        
+        $current_time = current_time('timestamp');
+        $expires_formatted = date('Y-m-d H:i:s', $expires);
+        $current_formatted = date('Y-m-d H:i:s', $current_time);
+        
+        error_log("WC LearnDash Debug: Current time: $current_formatted, Expires: $expires_formatted");
+        
+        if ($expires <= $current_time) {
+            error_log("WC LearnDash: ACCESS EXPIRED - Showing purchase option for expired course access - User: $user_id, Course: $course_id");
+            
+            // Set up content filtering and JavaScript injection
+            add_action('wp_head', [$this, 'add_expired_course_styles']);
+            add_action('wp_footer', [$this, 'inject_purchase_notice_javascript']);
+            
+            // Store course info for JavaScript injection
+            $this->expired_course_id = $course_id;
+            $this->expired_user_id = $user_id;
+        } else {
+            error_log("WC LearnDash Debug: Access still valid until $expires_formatted");
+        }
+    }
+    
+    /**
+     * Filter course content to show purchase notice for expired/non-logged-in users
+     * Only use this as fallback - JavaScript injection is primary method
+     */
+    public function filter_course_content($content) {
+        if (!is_singular('sfwd-courses')) {
+            return $content;
+        }
+        
+        global $post;
+        $course_id = $post->ID;
+        $user_id = get_current_user_id();
+        
+        // Skip for admins
+        if ($user_id && current_user_can('manage_options')) {
+            return $content;
+        }
+        
+        // Only filter content if JavaScript injection is not active
+        if (isset($this->expired_course_id)) {
+            return $content; // Let JavaScript handle it
+        }
+        
+        // For non-logged-in users, always show purchase incentive
+        if (!$user_id) {
+            error_log("WC LearnDash: Filtering content for non-logged-in user on course $course_id");
+            return $this->get_purchase_notice_html($course_id, 0);
+        }
+        
+        // For logged-in users, check expiration
+        $expire_key = "course_{$course_id}_access_expires";
+        $expires = get_user_meta($user_id, $expire_key, true);
+        
+        if (!$expires) {
+            return $content; // No expiration set, allow access
+        }
+        
+        $current_time = current_time('timestamp');
+        
+        if ($expires <= $current_time) {
+            error_log("WC LearnDash: Filtering content for expired user $user_id on course $course_id");
+            return $this->get_purchase_notice_html($course_id, $user_id);
+        }
+        
+        return $content;
+    }
+    
+    /**
+     * Get the purchase notice HTML
+     */
+    private function get_purchase_notice_html($course_id, $user_id) {
+        $course_title = get_the_title($course_id);
+        $is_logged_in = $user_id > 0;
+        
+        $title = $is_logged_in ? 'תוקף הגישה פג' : 'נדרשת רכישה לגישה לקורס';
+        $message = $is_logged_in 
+            ? "תוקף הגישה לקורס <strong>{$course_title}</strong> פג."
+            : "לצפייה בקורס <strong>{$course_title}</strong> נדרשת רכישה.";
+        $action_text = $is_logged_in ? 'לחידוש הגישה, אנא רכוש את הקורס מחדש:' : 'בחר את החבילה המתאימה לך:';
+        
+        return '<div id="wc-learndash-expired-notice-container">
+            <div class="expired-course-access-notice" style="background: #fff3cd; border: 2px solid #ffc107; border-radius: 8px; padding: 20px; margin: 20px auto; max-width: 800px; text-align: center; animation: fadeIn 0.5s ease-in;">
+                <h2 style="color: #856404; margin-top: 0;">
+                    <img draggable="false" role="img" class="emoji" alt="⏰" src="https://s.w.org/images/core/emoji/16.0.1/svg/23f0.svg"> ' . $title . '
+                </h2>
+                <p style="font-size: 16px; color: #856404;">' . $message . '</p>
+                <p style="color: #856404;">' . $action_text . '</p>
+                <div style="margin: 15px 0;">
+                    <a href="' . home_url('/product/מנוי-תרגול-לאתר/') . '" class="purchase-button" style="background: #0073aa; color: white; padding: 12px 24px; text-decoration: none; border-radius: 4px; margin: 5px; display: inline-block; font-weight: bold; transition: all 0.3s ease;">
+                        <img draggable="false" role="img" class="emoji" alt="🛒" src="https://s.w.org/images/core/emoji/16.0.1/svg/1f6d2.svg"> מנוי תרגול לאתר
+                    </a>
+                    <a href="' . home_url('/product/מנוי-תרגול/') . '" class="purchase-button" style="background: #0073aa; color: white; padding: 12px 24px; text-decoration: none; border-radius: 4px; margin: 5px; display: inline-block; font-weight: bold; transition: all 0.3s ease;">
+                        <img draggable="false" role="img" class="emoji" alt="🛒" src="https://s.w.org/images/core/emoji/16.0.1/svg/1f6d2.svg"> מנוי תרגול
+                    </a>
+                    <a href="' . home_url('/קורס-מקוון/') . '" class="purchase-button" style="background: #0073aa; color: white; padding: 12px 24px; text-decoration: none; border-radius: 4px; margin: 5px; display: inline-block; font-weight: bold; transition: all 0.3s ease;">
+                        <img draggable="false" role="img" class="emoji" alt="🛒" src="https://s.w.org/images/core/emoji/16.0.1/svg/1f6d2.svg"> קורס מקוון
+                    </a>
+                </div>
+                <p style="font-size: 14px; color: #6c757d; margin-bottom: 0;">
+                    צריך עזרה? <a href="' . home_url('/contact') . '">צור קשר עם התמיכה</a>
+                </p>
+            </div>
+        </div>';
+    }
+    
+    /**
+     * Add CSS styles for expired course notice
+     */
+    public function add_expired_course_styles() {
+        echo '<style>
+            @keyframes fadeIn {
+                from { opacity: 0; transform: translateY(20px); }
+                to { opacity: 1; transform: translateY(0); }
+            }
+            .purchase-button:hover {
+                background: #005177 !important;
+                transform: translateY(-2px);
+            }
+            .expired-course-access-notice {
+                box-shadow: 0 4px 12px rgba(0,0,0,0.1);
+            }
+        </style>';
+    }
+    
+    /**
+     * Inject purchase notice via JavaScript for Elementor compatibility
+     */
+    public function inject_purchase_notice_javascript() {
+        if (!isset($this->expired_course_id)) {
+            return;
+        }
+        
+        $course_id = $this->expired_course_id;
+        $user_id = $this->expired_user_id;
+        $course_title = get_the_title($course_id);
+        $is_logged_in = $user_id > 0;
+        
+        $title = $is_logged_in ? 'תוקף הגישה פג' : 'נדרשת רכישה לגישה לקורס';
+        $message = $is_logged_in 
+            ? "תוקף הגישה לקורס <strong>{$course_title}</strong> פג."
+            : "לצפייה בקורס <strong>{$course_title}</strong> נדרשת רכישה.";
+        $action_text = $is_logged_in ? 'לחידוש הגישה, אנא רכוש את הקורס מחדש:' : 'בחר את החבילה המתאימה לך:';
+        
+        ?>
+        <script>
+        jQuery(document).ready(function($) {
+            console.log('WC LearnDash: Initializing purchase notice injection');
+            
+            function injectPurchaseNotice() {
+                // Try multiple selectors for robust injection
+                var selectors = [
+                    '.elementor-element-5b10972 .learndash-wrapper--course',
+                    '.learndash-wrapper--course:first',
+                    '.ld-course-navigation + .learndash',
+                    '.learndash.learndash_course_content',
+                    '#wc-learndash-expired-notice-container'
+                ];
+                
+                var injected = false;
+                
+                for (var i = 0; i < selectors.length; i++) {
+                    var $container = $(selectors[i]);
+                    if ($container.length > 0 && !$container.find('.expired-course-access-notice').length) {
+                        console.log('WC LearnDash: Injecting notice into selector: ' + selectors[i]);
+                        
+                        var noticeHtml = '<div class="expired-course-access-notice" style="background: #fff3cd; border: 2px solid #ffc107; border-radius: 8px; padding: 20px; margin: 20px auto; max-width: 800px; text-align: center; animation: fadeIn 0.5s ease-in;">' +
+                            '<h2 style="color: #856404; margin-top: 0;">' +
+                                '<img draggable="false" role="img" class="emoji" alt="⏰" src="https://s.w.org/images/core/emoji/16.0.1/svg/23f0.svg"> <?php echo $title; ?>' +
+                            '</h2>' +
+                            '<p style="font-size: 16px; color: #856404;"><?php echo $message; ?></p>' +
+                            '<p style="color: #856404;"><?php echo $action_text; ?></p>' +
+                            '<div style="margin: 15px 0;">' +
+                                '<a href="<?php echo home_url('/product/מנוי-תרגול-לאתר/'); ?>" class="purchase-button" style="background: #0073aa; color: white; padding: 12px 24px; text-decoration: none; border-radius: 4px; margin: 5px; display: inline-block; font-weight: bold; transition: all 0.3s ease;">' +
+                                    '<img draggable="false" role="img" class="emoji" alt="🛒" src="https://s.w.org/images/core/emoji/16.0.1/svg/1f6d2.svg"> מנוי תרגול לאתר' +
+                                '</a>' +
+                                '<a href="<?php echo home_url('/product/מנוי-תרגול/'); ?>" class="purchase-button" style="background: #0073aa; color: white; padding: 12px 24px; text-decoration: none; border-radius: 4px; margin: 5px; display: inline-block; font-weight: bold; transition: all 0.3s ease;">' +
+                                    '<img draggable="false" role="img" class="emoji" alt="🛒" src="https://s.w.org/images/core/emoji/16.0.1/svg/1f6d2.svg"> מנוי תרגול' +
+                                '</a>' +
+                                '<a href="<?php echo home_url('/קורס-מקוון/'); ?>" class="purchase-button" style="background: #0073aa; color: white; padding: 12px 24px; text-decoration: none; border-radius: 4px; margin: 5px; display: inline-block; font-weight: bold; transition: all 0.3s ease;">' +
+                                    '<img draggable="false" role="img" class="emoji" alt="🛒" src="https://s.w.org/images/core/emoji/16.0.1/svg/1f6d2.svg"> קורס מקוון' +
+                                '</a>' +
+                            '</div>' +
+                            '<p style="font-size: 14px; color: #6c757d; margin-bottom: 0;">' +
+                                'צריך עזרה? <a href="<?php echo home_url('/contact'); ?>">צור קשר עם התמיכה</a>' +
+                            '</p>' +
+                        '</div>';
+                        
+                        $container.html(noticeHtml);
+                        injected = true;
+                        break;
+                    }
+                }
+                
+                if (!injected) {
+                    console.log('WC LearnDash: No suitable container found, retrying in 1 second');
+                    setTimeout(injectPurchaseNotice, 1000);
+                }
+            }
+            
+            // Try immediate injection
+            injectPurchaseNotice();
+            
+            // Also try after a short delay for dynamic content
+            setTimeout(injectPurchaseNotice, 500);
+        });
+        </script>
+        <?php
+    }
+    
+    public function woocommerce_missing_notice() {
+        echo '<div class="notice notice-error"><p>WooCommerce LearnDash Access Manager requires WooCommerce to be installed and active.</p></div>';
+    }
+    
+    /**
+     * Add custom fields to product edit page
+     */
+    public function add_custom_fields() {
+        global $post;
+        
+        echo '<div class="options_group wc-learndash-access-manager">';
+        echo '<h4 style="color: #2271b1; margin: 15px 0 10px 0; padding: 10px; background: #f0f6fc; border-left: 4px solid #2271b1;">🎓 הגדרות גישת LearnDash</h4>';
+        
+        // Access Duration Type
+        woocommerce_wp_select([
+            'id' => '_learndash_access_duration',
+            'label' => 'משך הגישה',
+            'description' => 'בחר כמה זמן ללקוחות תהיה גישה לקורסים',
+            'desc_tip' => true,
+            'options' => ['' => 'בחר משך זמן...'] + $this->access_options,
+            'wrapper_class' => 'form-field-wide'
+        ]);
+        
+        // Custom End Date (optional override)
+        woocommerce_wp_text_input([
+            'id' => '_learndash_custom_end_date',
+            'label' => 'תאריך סיום מותאם אישית (אופציונלי)',
+            'description' => 'קבע תאריך סיום ספציפי (שששש-חח-יי). זה יעקוף את הגדרת המשך זמן למעלה.',
+            'desc_tip' => true,
+            'type' => 'date',
+            'wrapper_class' => 'form-field-wide'
+        ]);
+        
+        // Associated LearnDash Courses
+        $courses = get_posts([
+            'post_type' => 'sfwd-courses',
+            'posts_per_page' => -1,
+            'post_status' => 'publish',
+            'orderby' => 'title',
+            'order' => 'ASC'
+        ]);
+        
+        if (!empty($courses)) {
+            echo '<p class="form-field form-field-wide">';
+            echo '<label for="_learndash_courses"><strong>קורסי LearnDash משויכים</strong></label>';
+            echo '<select id="_learndash_courses" name="_learndash_courses[]" multiple="multiple" style="width: 100%; height: 120px;">';
+            
+            $selected_courses = get_post_meta($post->ID, '_learndash_courses', true);
+            $selected_courses = is_array($selected_courses) ? $selected_courses : [];
+            
+            foreach ($courses as $course) {
+                $selected = in_array($course->ID, $selected_courses) ? 'selected="selected"' : '';
+                echo '<option value="' . esc_attr($course->ID) . '" ' . $selected . '>' . esc_html($course->post_title) . '</option>';
+            }
+            echo '</select>';
+            echo '<span class="description">החזק Ctrl/Cmd לבחירת קורסים מרובים. לקוחות יקבלו גישה לכל הקורסים הנבחרים.</span>';
+            echo '</p>';
+        } else {
+            echo '<p class="form-field form-field-wide">';
+            echo '<label><strong>לא נמצאו קורסי LearnDash</strong></label>';
+            echo '<span class="description">אנא צור קורסי LearnDash תחילה, ולאחר מכן חזור להגדיר גישה.</span>';
+            echo '</p>';
+        }
+        
+        // Display current settings preview
+        $current_duration = get_post_meta($post->ID, '_learndash_access_duration', true);
+        $current_custom_date = get_post_meta($post->ID, '_learndash_custom_end_date', true);
+        $current_courses = get_post_meta($post->ID, '_learndash_courses', true);
+        
+        if ($current_duration || $current_custom_date || $current_courses) {
+            echo '<div class="wc-learndash-preview" style="background: #fff; border: 1px solid #c3c4c7; padding: 12px; margin: 10px 0; border-radius: 4px;">';
+            echo '<h4 style="margin: 0 0 8px 0; color: #1d2327;">תצוגה מקדימה של הגדרות נוכחיות:</h4>';
+            
+            if ($current_duration) {
+                echo '<p><strong>משך זמן:</strong> ' . esc_html($this->access_options[$current_duration] ?? $current_duration) . '</p>';
+            }
+            
+            if ($current_custom_date) {
+                echo '<p><strong>תאריך סיום מותאם אישית:</strong> ' . esc_html($current_custom_date) . ' <em>(עוקף את משך הזמן)</em></p>';
+            }
+            
+            if ($current_courses && is_array($current_courses)) {
+                echo '<p><strong>קורסים (' . count($current_courses) . '):</strong><br>';
+                foreach ($current_courses as $course_id) {
+                    $course_title = get_the_title($course_id);
+                    echo '• ' . esc_html($course_title) . '<br>';
+                }
+                echo '</p>';
+            }
+            
+            if (!$current_duration && !$current_custom_date) {
+                echo '<p style="color: #d63638;"><strong>⚠️ אזהרה:</strong> לא הוגדר משך זמן גישה - לקוחות יקבלו גישה קבועה!</p>';
+            }
+            
+            echo '</div>';
+        }
+        
+        echo '</div>';
+        
+        // Add inline CSS for better styling
+        echo '<style>
+        .wc-learndash-access-manager {
+            background: #f9f9f9;
+            border: 1px solid #ddd;
+            padding: 15px;
+            margin: 15px 0;
+            border-radius: 6px;
+        }
+        .wc-learndash-access-manager .form-field-wide {
+            width: 100%;
+        }
+        .wc-learndash-access-manager select[multiple] {
+            min-height: 120px;
+        }
+        </style>';
+    }
+    
+    /**
+     * Save custom fields
+     */
+    public function save_custom_fields($post_id) {
+        // Verify nonce for security
+        if (!isset($_POST['woocommerce_meta_nonce']) || !wp_verify_nonce($_POST['woocommerce_meta_nonce'], 'woocommerce_save_data')) {
+            return;
+        }
+        
+        // Check user permissions
+        if (!current_user_can('edit_post', $post_id)) {
+            return;
+        }
+        
+        $duration = sanitize_text_field($_POST['_learndash_access_duration'] ?? '');
+        $custom_date = sanitize_text_field($_POST['_learndash_custom_end_date'] ?? '');
+        $courses = isset($_POST['_learndash_courses']) ? array_map('intval', $_POST['_learndash_courses']) : [];
+        
+        update_post_meta($post_id, '_learndash_access_duration', $duration);
+        update_post_meta($post_id, '_learndash_custom_end_date', $custom_date);
+        update_post_meta($post_id, '_learndash_courses', $courses);
+        
+        // Log the save action
+        error_log("WC LearnDash: Saved product {$post_id} - Duration: {$duration}, Custom Date: {$custom_date}, Courses: " . implode(',', $courses));
+    }
+    
+    /**
+     * Handle order completion
+     */
+    public function handle_order_completion($order_id) {
+        $this->process_learndash_access($order_id, 'order_completed');
+    }
+    
+    /**
+     * Handle payment completion
+     */
+    public function handle_payment_completion($order_id) {
+        $this->process_learndash_access($order_id, 'payment_completed');
+    }
+    
+    /**
+     * Process LearnDash access for completed orders
+     */
+    private function process_learndash_access($order_id, $trigger = '') {
+        $order = wc_get_order($order_id);
+        if (!$order) {
+            error_log("WC LearnDash: Order {$order_id} not found");
+            return;
+        }
+        
+        $user_id = $order->get_user_id();
+        if (!$user_id) {
+            error_log("WC LearnDash: No user ID found for order {$order_id}");
+            return;
+        }
+        
+        $processed_courses = [];
+        
+        foreach ($order->get_items() as $item) {
+            $product_id = $item->get_product_id();
+            $duration = get_post_meta($product_id, '_learndash_access_duration', true);
+            $custom_date = get_post_meta($product_id, '_learndash_custom_end_date', true);
+            
+            // Try multiple meta keys for course associations
+            $courses = $this->get_product_courses($product_id);
+            
+            if ((!$duration && !$custom_date) || empty($courses)) {
+                error_log("WC LearnDash: Product {$product_id} missing duration or courses. Duration: {$duration}, Courses: " . print_r($courses, true));
+                continue;
+            }
+            
+            // Calculate end date
+            $end_date = $this->calculate_end_date($duration, $custom_date);
+            
+            // Enroll user in courses
+            foreach ($courses as $course_id) {
+                if (!in_array($course_id, $processed_courses)) {
+                    $this->enroll_user_in_course($user_id, $course_id, $end_date, $order_id, $trigger);
+                    $processed_courses[] = $course_id;
+                }
+            }
+        }
+        
+        if (!empty($processed_courses)) {
+            $order->add_order_note("LearnDash Access Manager: Processed " . count($processed_courses) . " course enrollments via {$trigger}");
+        }
+    }
+    
+    /**
+     * Calculate end date based on duration or custom date
+     */
+    private function calculate_end_date($duration, $custom_date = '') {
+        if ($custom_date) {
+            return strtotime($custom_date . ' 23:59:59');
+        }
+        
+        $current_time = current_time('timestamp');
+        
+        switch ($duration) {
+            case 'paused_2weeks':
+            case 'trial_2weeks':
+                return strtotime('+2 weeks', $current_time);
+            case 'access_1month':
+                return strtotime('+1 month', $current_time);
+            case 'access_60days':
+                return strtotime('+60 days', $current_time);
+            case 'access_1year':
+                return strtotime('+1 year', $current_time);
+            default:
+                return 0; // No expiration
+        }
+    }
+    
+    /**
+     * Enroll user in LearnDash course with access control
+     */
+    private function enroll_user_in_course($user_id, $course_id, $end_date, $order_id, $trigger = '') {
+        // Remove existing access first to ensure clean state
+        ld_update_course_access($user_id, $course_id, $remove = true);
+        error_log("[Lilac Course Access] LearnDash access updated for user {$user_id}, course {$course_id}, access: removed");
+        
+        // Add the user to the course
+        ld_update_course_access($user_id, $course_id, $remove = false);
+        
+        // Set expiration date in user meta
+        $access_key = "course_{$course_id}_access_from";
+        $expire_key = "course_{$course_id}_access_expires";
+        $order_key = "course_{$course_id}_order_id";
+        
+        update_user_meta($user_id, $access_key, current_time('timestamp'));
+        update_user_meta($user_id, $order_key, $order_id);
+        
+        // Set grace period for recent purchase (10 minutes)
+        update_user_meta($user_id, 'lilac_recent_purchase_redirect', current_time('timestamp'));
+        
+        // Store the purchased course for redirection tracking
+        update_user_meta($user_id, 'lilac_last_purchased_course', $course_id);
+        update_user_meta($user_id, 'lilac_last_purchase_time', current_time('timestamp'));
+        
+        if ($end_date > 0) {
+            update_user_meta($user_id, $expire_key, $end_date);
+        } else {
+            delete_user_meta($user_id, $expire_key); // Remove expiration if set to permanent
+        }
+        
+        // Also populate the lilac_user_subscriptions table for dashboard display
+        $this->update_user_subscription_record($user_id, $course_id, $end_date, $order_id);
+        
+        // Log enrollment
+        $course_title = get_the_title($course_id);
+        $expire_text = $end_date > 0 ? date('Y-m-d H:i:s', $end_date) : 'No expiration';
+        error_log("WC LearnDash: Enrolled user {$user_id} in course '{$course_title}' (ID: {$course_id}), expires: {$expire_text}, trigger: {$trigger}");
+        
+        // Add order note
+        $order = wc_get_order($order_id);
+        if ($order) {
+            $expire_note = $end_date > 0 ? ' (expires: ' . date('Y-m-d', $end_date) . ')' : ' (no expiration)';
+            $order->add_order_note("LearnDash: Enrolled in '{$course_title}'{$expire_note}");
+        }
+    }
+    
+    /**
+     * Create the lilac_user_subscriptions table if it doesn't exist
+     */
+    public function maybe_create_subscription_table() {
+        global $wpdb;
+        
+        // Add execution time and memory monitoring
+        $start_time = microtime(true);
+        $start_memory = memory_get_usage(true);
+        error_log('WC LearnDash: Table creation started - Memory: ' . round($start_memory / 1024 / 1024, 2) . 'MB');
+        
+        $charset_collate = $wpdb->get_charset_collate();
+        
+        // Create lilac_user_subscriptions table
+        $table_name = $wpdb->prefix . 'lilac_user_subscriptions';
+        $table_exists = $wpdb->get_var($wpdb->prepare("SHOW TABLES LIKE %s", $table_name));
+        
+        if ($table_exists != $table_name) {
+            $sql = "CREATE TABLE {$table_name} (
+                id bigint(20) NOT NULL AUTO_INCREMENT,
+                user_id bigint(20) NOT NULL,
+                product_id bigint(20) NOT NULL,
+                course_id bigint(20) NOT NULL,
+                access_started datetime DEFAULT '0000-00-00 00:00:00' NOT NULL,
+                access_expires datetime DEFAULT '0000-00-00 00:00:00' NOT NULL,
+                duration_days int(11) NOT NULL,
+                status varchar(20) DEFAULT 'active' NOT NULL,
+                order_id bigint(20) DEFAULT 0,
+                metadata longtext,
+                created_at datetime DEFAULT CURRENT_TIMESTAMP NOT NULL,
+                updated_at datetime DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP NOT NULL,
+                PRIMARY KEY  (id),
+                KEY user_id (user_id),
+                KEY product_id (product_id),
+                KEY course_id (course_id),
+                KEY status (status),
+                KEY access_expires (access_expires)
+            ) {$charset_collate};";
+
+            require_once(ABSPATH . 'wp-admin/includes/upgrade.php');
+            dbDelta($sql);
+            
+            error_log("WC LearnDash: Created lilac_user_subscriptions table");
+        }
+        
+        // Create user_registration_sessions table for auto-login
+        $sessions_table = $wpdb->prefix . 'user_registration_sessions';
+        $sessions_exists = $wpdb->get_var($wpdb->prepare("SHOW TABLES LIKE %s", $sessions_table));
+        
+        if ($sessions_exists != $sessions_table) {
+            $sql = "CREATE TABLE {$sessions_table} (
+                session_id bigint(20) unsigned NOT NULL AUTO_INCREMENT,
+                session_key char(32) NOT NULL,
+                session_value longtext NOT NULL,
+                session_expiry bigint(20) unsigned NOT NULL,
+                PRIMARY KEY (session_key),
+                UNIQUE KEY session_id (session_id)
+            ) {$charset_collate};";
+
+            require_once(ABSPATH . 'wp-admin/includes/upgrade.php');
+            dbDelta($sql);
+            
+            error_log("WC LearnDash: Created user_registration_sessions table");
+        }
+        
+        // Create registration_codes table
+        $reg_codes_table = $wpdb->prefix . 'registration_codes';
+        $reg_codes_exists = $wpdb->get_var($wpdb->prepare("SHOW TABLES LIKE %s", $reg_codes_table));
+        
+        if ($reg_codes_exists != $reg_codes_table) {
+            $sql = "CREATE TABLE {$reg_codes_table} (
+                id mediumint(9) NOT NULL AUTO_INCREMENT,
+                code varchar(255) NOT NULL,
+                group_name varchar(100) DEFAULT '',
+                role varchar(50) NOT NULL DEFAULT 'subscriber',
+                course_id bigint(20) DEFAULT NULL,
+                max_uses int(11) DEFAULT 1,
+                used_count int(11) DEFAULT 0,
+                expiry_date datetime DEFAULT NULL,
+                created_date datetime DEFAULT CURRENT_TIMESTAMP,
+                is_active tinyint(1) DEFAULT 1,
+                school_name varchar(255) DEFAULT '',
+                school_city varchar(100) DEFAULT '',
+                school_code varchar(50) DEFAULT '',
+                mobile_phone varchar(20) DEFAULT '',
+                PRIMARY KEY (id),
+                UNIQUE KEY code (code),
+                KEY school_name (school_name),
+                KEY school_city (school_city),
+                KEY school_code (school_code),
+                KEY mobile_phone (mobile_phone)
+            ) {$charset_collate};";
+
+            require_once(ABSPATH . 'wp-admin/includes/upgrade.php');
+            dbDelta($sql);
+            
+            error_log("WC LearnDash: Created registration_codes table");
+        }
+        
+        // Create teacher_import_logs table
+        $teacher_logs_table = $wpdb->prefix . 'teacher_import_logs';
+        $teacher_logs_exists = $wpdb->get_var($wpdb->prepare("SHOW TABLES LIKE %s", $teacher_logs_table));
+        
+        if ($teacher_logs_exists != $teacher_logs_table) {
+            $sql = "CREATE TABLE {$teacher_logs_table} (
+                id bigint(20) NOT NULL AUTO_INCREMENT,
+                import_date datetime NOT NULL,
+                imported int(11) NOT NULL DEFAULT 0,
+                failed int(11) NOT NULL DEFAULT 0,
+                total int(11) NOT NULL DEFAULT 0,
+                import_data longtext,
+                PRIMARY KEY (id)
+            ) {$charset_collate};";
+
+            require_once(ABSPATH . 'wp-admin/includes/upgrade.php');
+            dbDelta($sql);
+            
+            error_log("WC LearnDash: Created teacher_import_logs table");
+        }
+        
+        // Create school_promo_codes table
+        $promo_codes_table = $wpdb->prefix . 'school_promo_codes';
+        $promo_codes_exists = $wpdb->get_var($wpdb->prepare("SHOW TABLES LIKE %s", $promo_codes_table));
+        
+        if ($promo_codes_exists != $promo_codes_table) {
+            $sql = "CREATE TABLE {$promo_codes_table} (
+                id bigint(20) unsigned NOT NULL AUTO_INCREMENT,
+                code varchar(50) NOT NULL,
+                prefix varchar(10) DEFAULT NULL,
+                course_id bigint(20) NOT NULL,
+                max_uses int(11) DEFAULT 1,
+                used_count int(11) DEFAULT 0,
+                expiry_date datetime DEFAULT NULL,
+                created_date datetime DEFAULT CURRENT_TIMESTAMP,
+                is_active tinyint(1) DEFAULT 1,
+                PRIMARY KEY (id),
+                UNIQUE KEY code (code)
+            ) {$charset_collate};";
+
+            require_once(ABSPATH . 'wp-admin/includes/upgrade.php');
+            dbDelta($sql);
+            
+            error_log("WC LearnDash: Created school_promo_codes table");
+        }
+        
+        // Log completion time and memory usage
+        $end_time = microtime(true);
+        $end_memory = memory_get_usage(true);
+        $execution_time = round(($end_time - $start_time) * 1000, 2);
+        $memory_used = round(($end_memory - $start_memory) / 1024 / 1024, 2);
+        
+        error_log('WC LearnDash: Table creation completed - Time: ' . $execution_time . 'ms, Memory used: ' . $memory_used . 'MB, Peak: ' . round(memory_get_peak_usage(true) / 1024 / 1024, 2) . 'MB');
+        
+        // Check if we're approaching memory limits
+        $memory_limit = ini_get('memory_limit');
+        $memory_limit_bytes = $this->convert_to_bytes($memory_limit);
+        $current_usage = memory_get_usage(true);
+        $usage_percentage = round(($current_usage / $memory_limit_bytes) * 100, 1);
+        
+        if ($usage_percentage > 80) {
+            error_log('WC LearnDash: WARNING - High memory usage: ' . $usage_percentage . '% of ' . $memory_limit);
+        }
+    }
+    
+    /**
+     * Convert memory limit string to bytes
+     */
+    private function convert_to_bytes($val) {
+        $val = trim($val);
+        $last = strtolower($val[strlen($val)-1]);
+        $val = (int) $val;
+        switch($last) {
+            case 'g': $val *= 1024;
+            case 'm': $val *= 1024;
+            case 'k': $val *= 1024;
+        }
+        return $val;
+    }
+    
+    /**
+     * Single enrollment method to prevent duplicate processing
+     */
+    public function enroll_user_in_courses_once($order_id) {
+        // Use a shorter, more specific lock to avoid blocking checkout
+        $lock_key = 'wc_learndash_enroll_' . $order_id;
+        
+        // Check if already processed recently (5 minute window)
+        if (get_transient($lock_key)) {
+            error_log('WC LearnDash: Duplicate processing prevented for order ' . $order_id);
+            return;
+        }
+        
+        error_log('WC LearnDash: Single enrollment started for order ' . $order_id);
+        
+        // Get order and process enrollment directly
+        $order = wc_get_order($order_id);
+        if (!$order) {
+            error_log('WC LearnDash: Invalid order ID: ' . $order_id);
+            return;
+        }
+        
+        $user_id = $order->get_user_id();
+        if (!$user_id) {
+            error_log('WC LearnDash: No user ID found for order: ' . $order_id);
+            return;
+        }
+        
+        // Process each item in the order
+        foreach ($order->get_items() as $item) {
+            $product_id = $item->get_product_id();
+            $courses = $this->get_product_courses($product_id);
+            
+            foreach ($courses as $course_id) {
+                // Enroll user in course
+                if (function_exists('ld_update_course_access')) {
+                    ld_update_course_access($user_id, $course_id, false);
+                    error_log("WC LearnDash: Enrolled user {$user_id} in course {$course_id}");
+                }
+            }
+        }
+        
+        // Set lock AFTER successful processing to prevent duplicates
+        set_transient($lock_key, true, 300); // 5 minutes
+        
+        error_log('WC LearnDash: Single enrollment completed successfully for order ' . $order_id);
+    }
+    
+    /**
+     * Update user subscription record in lilac_user_subscriptions table
+     */
+    private function update_user_subscription_record($user_id, $course_id, $end_date, $order_id) {
+        global $wpdb;
+        
+        $table_name = $wpdb->prefix . 'lilac_user_subscriptions';
+        
+        // Get product ID from order
+        $product_id = 0;
+        $duration_days = 0;
+        
+        $order = wc_get_order($order_id);
+        if ($order) {
+            foreach ($order->get_items() as $item) {
+                $item_product_id = $item->get_product_id();
+                $courses = $this->get_product_courses($item_product_id);
+                
+                if (in_array($course_id, $courses)) {
+                    $product_id = $item_product_id;
+                    
+                    // Calculate duration in days
+                    $start_time = current_time('timestamp');
+                    if ($end_date > 0) {
+                        $duration_days = ceil(($end_date - $start_time) / DAY_IN_SECONDS);
+                    }
+                    break;
+                }
+            }
+        }
+        
+        // Check if record already exists
+        $existing = $wpdb->get_row($wpdb->prepare(
+            "SELECT id FROM $table_name WHERE user_id = %d AND course_id = %d AND order_id = %d",
+            $user_id, $course_id, $order_id
+        ));
+        
+        $data = array(
+            'user_id' => $user_id,
+            'product_id' => $product_id,
+            'course_id' => $course_id,
+            'access_started' => current_time('mysql'),
+            'access_expires' => $end_date > 0 ? date('Y-m-d H:i:s', $end_date) : '0000-00-00 00:00:00',
+            'duration_days' => $duration_days,
+            'status' => 'active',
+            'order_id' => $order_id,
+            'updated_at' => current_time('mysql')
+        );
+        
+        if ($existing) {
+            // Update existing record
+            $wpdb->update($table_name, $data, array('id' => $existing->id));
+            error_log("WC LearnDash: Updated subscription record for user {$user_id}, course {$course_id}");
+        } else {
+            // Insert new record
+            $data['created_at'] = current_time('mysql');
+            $wpdb->insert($table_name, $data);
+            error_log("WC LearnDash: Created subscription record for user {$user_id}, course {$course_id}");
+        }
+    }
+    
+    /**
+     * Get courses associated with a product
+     */
+    private function get_product_courses($product_id) {
+        $courses = [];
+        
+        // Try multiple meta keys for course associations
+        $meta_keys = [
+            '_learndash_courses',     // Our custom meta
+            '_related_course',        // LearnDash WooCommerce
+            'lilac_courses',         // Legacy fallback
+            '_course_id'             // Another possible key
+        ];
+        
+        foreach ($meta_keys as $meta_key) {
+            $course_data = get_post_meta($product_id, $meta_key, true); // Get single value, not array
+            if (!empty($course_data)) {
+                error_log("WC LearnDash: Raw course data for product {$product_id} using meta key {$meta_key}: " . print_r($course_data, true));
+                
+                // Handle serialized data
+                if (is_string($course_data) && is_serialized($course_data)) {
+                    $unserialized = maybe_unserialize($course_data);
+                    if (is_array($unserialized)) {
+                        $courses = $unserialized;
+                    }
+                } elseif (is_array($course_data)) {
+                    $courses = $course_data;
+                } elseif (is_numeric($course_data)) {
+                    $courses = [$course_data];
+                }
+                
+                error_log("WC LearnDash: Processed courses for product {$product_id}: " . print_r($courses, true));
+                break;
+            }
+        }
+        
+        $final_courses = array_filter(array_map('intval', $courses));
+        error_log("WC LearnDash: Final courses for product {$product_id}: " . print_r($final_courses, true));
+        
+        return $final_courses;
+    }
+    
+    /**
+     * Handle post-purchase redirection to correct course
+     */
+    public function handle_post_purchase_redirect($order_id) {
+        if (!$order_id) {
+            return;
+        }
+        
+        $order = wc_get_order($order_id);
+        if (!$order) {
+            return;
+        }
+        
+        $user_id = $order->get_user_id();
+        if (!$user_id) {
+            return;
+        }
+        
+        // Get the first course from the order for redirection
+        $redirect_course_id = null;
+        
+        foreach ($order->get_items() as $item) {
+            $product_id = $item->get_product_id();
+            $courses = $this->get_product_courses($product_id);
+            
+            if (!empty($courses)) {
+                $redirect_course_id = $courses[0]; // Use first course for redirection
+                break;
+            }
+        }
+        
+        if ($redirect_course_id) {
+            // Store redirection info
+            update_user_meta($user_id, 'lilac_redirect_course_id', $redirect_course_id);
+            update_user_meta($user_id, 'lilac_redirect_timestamp', current_time('timestamp'));
+            
+            $course_url = get_permalink($redirect_course_id);
+            error_log("WC LearnDash: Setting up redirect for user {$user_id} to course {$redirect_course_id} ({$course_url}) after order {$order_id}");
+            
+            // Verify we have the correct course URL
+            if (empty($course_url) || $course_url === false) {
+                error_log("WC LearnDash: ERROR - Could not get permalink for course {$redirect_course_id}");
+                return;
+            }
+            
+            // Add JavaScript redirect with delay - use closure to capture variables
+            $self = $this;
+            add_action('wp_footer', function() use ($course_url, $redirect_course_id, $user_id, $order_id) {
+                ?>
+                <script>
+                console.log('WC LearnDash: Redirecting user <?php echo $user_id; ?> to course <?php echo $redirect_course_id; ?>: <?php echo esc_js($course_url); ?>');
+                console.log('WC LearnDash: Order ID: <?php echo $order_id; ?>');
+                setTimeout(function() {
+                    window.location.href = '<?php echo esc_js($course_url); ?>';
+                }, 3000); // 3 second delay
+                </script>
+                <?php
+            });
+        }
+    }
+    
+    /**
+     * Check course access limits for LearnDash bypass
+     */
+    public function check_course_access_limits($bypass, $user_id, $course_id, $post) {
+        if (!$user_id || $bypass) {
+            return $bypass;
+        }
+        
+        // Check expiration
+        $expire_key = "course_{$course_id}_access_expires";
+        $expires = get_user_meta($user_id, $expire_key, true);
+        
+        if ($expires && $expires > 0 && $expires < current_time('timestamp')) {
+            error_log("WC LearnDash: Access limits check - denying bypass for expired user {$user_id} to course {$course_id}");
+            return false;
+        }
+        
+        return $bypass;
+    }
+    
+    /**
+     * Filter course access based on expiration
+     */
+    public function filter_course_access($hasAccess, $postId, $userId) {
+        if (!$hasAccess || !$userId) {
+            return $hasAccess;
+        }
+        
+        // Check if this is a course
+        if (get_post_type($postId) !== 'sfwd-courses') {
+            return $hasAccess;
+        }
+        
+        // Check expiration
+        $expire_key = "course_{$postId}_access_expires";
+        $expires = get_user_meta($userId, $expire_key, true);
+        
+        if ($expires && $expires > 0 && $expires < current_time('timestamp')) {
+            error_log("WC LearnDash: Access denied for user {$userId} to course {$postId} - expired on " . date('Y-m-d H:i:s', $expires));
+            return false;
+        }
+        
+        return $hasAccess;
+    }
+    
+    /**
+     * Redirect expired course access
+     */
+    public function redirect_expired_course_access() {
+        if (!is_singular('sfwd-courses') || !is_user_logged_in()) {
+            return;
+        }
+        
+        global $post;
+        $userId = get_current_user_id();
+        $courseId = $post->ID;
+        
+        // Check expiration
+        $expire_key = "course_{$courseId}_access_expires";
+        $expires = get_user_meta($userId, $expire_key, true);
+        
+        if ($expires && $expires > 0 && $expires < current_time('timestamp')) {
+            error_log("WC LearnDash: Redirecting expired user {$userId} from course {$courseId}");
+            wp_redirect(home_url('/shop/'));
+            exit;
+        }
+    }
+    
+    /**
+     * Check user course access at LearnDash level
+     */
+    public function check_user_course_access($hasAccess, $courseId, $userId) {
+        if (!$hasAccess || !$userId) {
+            return $hasAccess;
+        }
+        
+        return $this->check_course_expiration($userId, $courseId, 'learndash_user_has_course_access');
+    }
+    
+    /**
+     * Filter course access from
+     */
+    public function filter_course_access_from($hasAccess, $courseId, $userId) {
+        if (!$hasAccess || !$userId) {
+            return $hasAccess;
+        }
+        
+        return $this->check_course_expiration($userId, $courseId, 'learndash_course_access_from');
+    }
+    
+    /**
+     * Filter lesson access
+     */
+    public function filter_lesson_access($hasAccess, $lessonId, $userId, $courseId) {
+        if (!$hasAccess || !$userId || !$courseId) {
+            return $hasAccess;
+        }
+        
+        return $this->check_course_expiration($userId, $courseId, 'learndash_lesson_access_from');
+    }
+    
+    /**
+     * Filter topic access
+     */
+    public function filter_topic_access($hasAccess, $topicId, $userId, $courseId) {
+        if (!$hasAccess || !$userId || !$courseId) {
+            return $hasAccess;
+        }
+        
+        return $this->check_course_expiration($userId, $courseId, 'learndash_topic_access_from');
+    }
+    
+    /**
+     * Filter quiz access
+     */
+    public function filter_quiz_access($hasAccess, $quizId, $userId, $courseId) {
+        if (!$hasAccess || !$userId || !$courseId) {
+            return $hasAccess;
+        }
+        
+        return $this->check_course_expiration($userId, $courseId, 'learndash_quiz_access_from');
+    }
+    
+    /**
+     * Central method to check course expiration
+     */
+    private function check_course_expiration($userId, $courseId, $hook) {
+        $expire_key = "course_{$courseId}_access_expires";
+        $expires = get_user_meta($userId, $expire_key, true);
+        
+        if ($expires && $expires > 0 && $expires < current_time('timestamp')) {
+            error_log("WC LearnDash: Access denied for user {$userId} to course {$courseId} via {$hook} - expired on " . date('Y-m-d H:i:s', $expires));
+            return false;
+        }
+        
+        return true;
+    }
+    
+    /**
+     * Add admin scripts for enhanced UI
+     */
+    public function admin_scripts($hook) {
+        // Add CSS for product list column styling
+        if ($hook === 'edit.php' && get_current_screen()->post_type === 'product') {
+            wp_add_inline_style('wp-admin', '
+                .wp-list-table .column-learndash_access {
+                    width: 180px;
+                    min-width: 160px;
+                }
+                .wp-list-table .column-learndash_access strong {
+                    color: #2271b1;
+                    font-weight: 600;
+                    display: block;
+                    margin-bottom: 2px;
+                }
+                .wp-list-table .column-learndash_access small {
+                    color: #646970;
+                    font-size: 12px;
+                    line-height: 1.4;
+                }
+            ');
+        }
+        
+        if (($hook === 'post.php' || $hook === 'post-new.php') && get_post_type() === 'product') {
+            wp_enqueue_script('jquery');
+            
+            // Add inline JavaScript for better UX
+            wp_add_inline_script('jquery', '
+            jQuery(document).ready(function($) {
+                // Duration change handler
+                $("#_learndash_access_duration").on("change", function() {
+                    var duration = $(this).val();
+                    var preview = $(".wc-learndash-preview");
+                    
+                    if (duration) {
+                        var info = "";
+                        switch(duration) {
+                            case "paused_2weeks":
+                                info = "⏱️ הגישה מתחילה כאשר המנוי מופעל ונמשכת 2 שבועות";
+                                break;
+                            case "trial_2weeks":
+                                info = "🆓 גישת ניסיון ל-2 שבועות מתאריך הרכישה";
+                                break;
+                            case "access_1month":
+                                info = "📅 גישה לחודש אחד מתאריך הרכישה";
+                                break;
+                            case "access_60days":
+                                info = "📅 גישה ל-60 יום מתאריך הרכישה";
+                                break;
+                            case "access_1year":
+                                info = "🗓️ גישה לשנה אחת מתאריך הרכישה";
+                                break;
+                        }
+                        
+                        if (!$(".wc-learndash-duration-info").length) {
+                            $(this).after("<div class=\"wc-learndash-duration-info\" style=\"background: #e7f3ff; border-left: 4px solid #2271b1; padding: 8px 12px; margin: 8px 0; font-size: 12px;\">" + info + "</div>");
+                        } else {
+                            $(".wc-learndash-duration-info").html(info);
+                        }
+                    } else {
+                        $(".wc-learndash-duration-info").remove();
+                    }
+                });
+                
+                // Custom date change handler
+                $("#_learndash_custom_end_date").on("change", function() {
+                    var customDate = $(this).val();
+                    if (customDate) {
+                        if (!$(".wc-learndash-custom-warning").length) {
+                            $(this).after("<div class=\"wc-learndash-custom-warning\" style=\"background: #fff3cd; border-left: 4px solid #ffc107; padding: 8px 12px; margin: 8px 0; font-size: 12px;\">⚠️ תאריך סיום מותאם אישית יעקוף את הגדרת המשך הזמן למעלה.</div>");
+                        }
+                    } else {
+                        $(".wc-learndash-custom-warning").remove();
+                    }
+                });
+                
+                // Initialize on page load
+                $("#_learndash_access_duration").trigger("change");
+                $("#_learndash_custom_end_date").trigger("change");
+                
+                console.log("WC LearnDash Access Manager: Admin scripts loaded");
+            });
+            ');
+        }
+    }
+    
+    /**
+     * AJAX handler for updating course expiration dates
+     */
+    public function ajax_update_course_expiry() {
+        // Verify nonce
+        if (!isset($_POST['nonce']) || !wp_verify_nonce($_POST['nonce'], 'update_course_expiry')) {
+            wp_send_json_error('Security check failed');
+        }
+        
+        // Check user capabilities
+        if (!current_user_can('edit_users')) {
+            wp_send_json_error('Insufficient permissions');
+        }
+        
+        // Get and validate parameters
+        $user_id = isset($_POST['user_id']) ? intval($_POST['user_id']) : 0;
+        $new_date = isset($_POST['new_date']) ? sanitize_text_field($_POST['new_date']) : '';
+        
+        if (!$user_id || !$new_date) {
+            wp_send_json_error('Invalid parameters');
+        }
+        
+        // Validate date format
+        $date_obj = DateTime::createFromFormat('Y-m-d', $new_date);
+        if (!$date_obj) {
+            wp_send_json_error('Invalid date format');
+        }
+        
+        // Convert to timestamp (end of day)
+        $new_timestamp = strtotime($new_date . ' 23:59:59');
+        if (!$new_timestamp) {
+            wp_send_json_error('Invalid date');
+        }
+        
+        // Get user's current course access data
+        $user_meta = get_user_meta($user_id);
+        $updated_courses = [];
+        
+        // Update all course expiration dates for this user
+        foreach ($user_meta as $key => $value) {
+            if (preg_match('/^course_(\d+)_access_expires$/', $key, $matches)) {
+                $course_id = $matches[1];
+                $old_timestamp = $value[0];
+                
+                // Update the course access expiration
+                update_user_meta($user_id, $key, $new_timestamp);
+                
+                // Also update LearnDash course access if function exists
+                if (function_exists('ld_update_course_access')) {
+                    ld_update_course_access($user_id, $course_id, false, $new_timestamp);
+                }
+                
+                $updated_courses[] = [
+                    'course_id' => $course_id,
+                    'course_title' => get_the_title($course_id),
+                    'old_date' => date('d/m/Y', $old_timestamp),
+                    'new_date' => date('d/m/Y', $new_timestamp)
+                ];
+            }
+        }
+        
+        if (empty($updated_courses)) {
+            wp_send_json_error('No course access found for this user');
+        }
+        
+        // Log the update for debugging
+        error_log(sprintf(
+            'WC LearnDash Access Manager: Updated course expiration for user %d. Courses: %s',
+            $user_id,
+            json_encode($updated_courses)
+        ));
+        
+        wp_send_json_success([
+            'message' => sprintf('Updated %d course(s) expiration date', count($updated_courses)),
+            'updated_courses' => $updated_courses,
+            'new_date' => date('d/m/Y', $new_timestamp)
+        ]);
+    }
+    
+    /**
+     * AJAX handler for quick set course expiry
+     */
+    public function ajax_quick_set_course_expiry() {
+        // Verify nonce
+        if (!isset($_POST['nonce']) || !wp_verify_nonce($_POST['nonce'], 'quick_set_course_expiry')) {
+            wp_send_json_error('Security check failed');
+        }
+        
+        // Check user capabilities
+        if (!current_user_can('edit_users')) {
+            wp_send_json_error('Insufficient permissions');
+        }
+        
+        $user_id = intval($_POST['user_id']);
+        $course_id = intval($_POST['course_id']);
+        $expiry_type = sanitize_text_field($_POST['expiry_type']);
+        $custom_date = sanitize_text_field($_POST['custom_date']);
+        
+        if (!$user_id || !$course_id) {
+            wp_send_json_error('Invalid parameters');
+        }
+        
+        $expiry_timestamp = 0;
+        
+        switch ($expiry_type) {
+            case '1_week':
+                $expiry_timestamp = current_time('timestamp') + (7 * DAY_IN_SECONDS);
+                break;
+            case '1_month':
+                $expiry_timestamp = current_time('timestamp') + (30 * DAY_IN_SECONDS);
+                break;
+            case '3_months':
+                $expiry_timestamp = current_time('timestamp') + (90 * DAY_IN_SECONDS);
+                break;
+            case '1_year':
+                $expiry_timestamp = current_time('timestamp') + (365 * DAY_IN_SECONDS);
+                break;
+            case 'custom':
+                if ($custom_date) {
+                    $expiry_timestamp = strtotime($custom_date . ' 23:59:59');
+                }
+                break;
+            case 'permanent':
+                $expiry_timestamp = 0;
+                break;
+        }
+        
+        if ($expiry_type !== 'permanent' && !$expiry_timestamp) {
+            wp_send_json_error('Invalid expiration date');
+        }
+        
+        // Update user meta
+        $meta_key = 'course_' . $course_id . '_access_expires';
+        update_user_meta($user_id, $meta_key, $expiry_timestamp);
+        
+        // Update LearnDash if available
+        if (function_exists('ld_update_course_access')) {
+            ld_update_course_access($user_id, $course_id, false, $expiry_timestamp);
+        }
+        
+        wp_send_json_success([
+            'message' => 'Course expiration updated successfully',
+            'new_expiry' => $expiry_timestamp ? date('d/m/Y', $expiry_timestamp) : 'Permanent'
+        ]);
+    }
+    
+    /**
+     * AJAX handler to get user course data
+     */
+    public function ajax_get_user_course_data() {
+        // Verify nonce
+        if (!isset($_POST['nonce']) || !wp_verify_nonce($_POST['nonce'], 'get_user_course_data')) {
+            wp_send_json_error('Security check failed');
+        }
+        
+        $user_id = intval($_POST['user_id']);
+        if (!$user_id) {
+            wp_send_json_error('Invalid user ID');
+        }
+        
+        $user_meta = get_user_meta($user_id);
+        $courses = [];
+        
+        foreach ($user_meta as $key => $value) {
+            if (preg_match('/^course_(\d+)_access_expires$/', $key, $matches)) {
+                $course_id = $matches[1];
+                $expires_timestamp = $value[0];
+                
+                $courses[] = [
+                    'course_id' => $course_id,
+                    'course_title' => get_the_title($course_id),
+                    'expires' => $expires_timestamp,
+                    'expires_formatted' => $expires_timestamp ? date('d/m/Y', $expires_timestamp) : 'Permanent'
+                ];
+            }
+        }
+        
+        wp_send_json_success($courses);
+    }
+    
+    /**
+     * AJAX handler for simple toggle course access
+     */
+    public function ajax_toggle_course_access() {
+        // Verify nonce
+        if (!isset($_POST['nonce']) || !wp_verify_nonce($_POST['nonce'], 'toggle_course_access')) {
+            wp_send_json_error('Security check failed');
+        }
+        
+        // Check user capabilities
+        if (!current_user_can('edit_users')) {
+            wp_send_json_error('Insufficient permissions');
+        }
+        
+        $user_id = intval($_POST['user_id']);
+        if (!$user_id) {
+            wp_send_json_error('Invalid user ID');
+        }
+        
+        $course_id = 123; // Default course ID - can be made configurable
+        $meta_key = 'course_' . $course_id . '_access_expires';
+        
+        // Check current access status
+        $current_expiry = get_user_meta($user_id, $meta_key, true);
+        $has_active_access = !$current_expiry || $current_expiry == 0 || $current_expiry > current_time('timestamp');
+        
+        if ($has_active_access) {
+            // Deactivate: Set to expired (yesterday)
+            $yesterday = current_time('timestamp') - DAY_IN_SECONDS;
+            update_user_meta($user_id, $meta_key, $yesterday);
+            
+            if (function_exists('ld_update_course_access')) {
+                ld_update_course_access($user_id, $course_id, true); // Remove access
+            }
+            
+            wp_send_json_success([
+                'message' => 'Course access deactivated',
+                'new_status' => 'inactive'
+            ]);
+        } else {
+            // Activate: Set to permanent (0 = no expiration)
+            update_user_meta($user_id, $meta_key, 0);
+            
+            if (function_exists('ld_update_course_access')) {
+                ld_update_course_access($user_id, $course_id, false, 0); // Grant permanent access
+            }
+            
+            wp_send_json_success([
+                'message' => 'Course access activated',
+                'new_status' => 'active'
+            ]);
+        }
+    }
+    
+    /**
+     * AJAX handler to get simple course status
+     */
+    public function ajax_get_simple_course_status() {
+        // Verify nonce
+        if (!isset($_POST['nonce']) || !wp_verify_nonce($_POST['nonce'], 'get_simple_course_status')) {
+            wp_send_json_error('Security check failed');
+        }
+        
+        $user_id = intval($_POST['user_id']);
+        if (!$user_id) {
+            wp_send_json_error('Invalid user ID');
+        }
+        
+        $user_meta = get_user_meta($user_id);
+        $has_active_access = false;
+        $course_count = 0;
+        
+        // Check for course access
+        foreach ($user_meta as $key => $value) {
+            if (preg_match('/^course_(\d+)_access_expires$/', $key, $matches)) {
+                $course_count++;
+                $expires_timestamp = $value[0];
+                
+                if (!$expires_timestamp || $expires_timestamp == 0 || $expires_timestamp > current_time('timestamp')) {
+                    $has_active_access = true;
+                    break;
+                }
+            }
+        }
+        
+        // Check LearnDash course enrollment as fallback
+        if (!$has_active_access && function_exists('learndash_user_get_enrolled_courses')) {
+            $enrolled_courses = learndash_user_get_enrolled_courses($user_id);
+            if (!empty($enrolled_courses)) {
+                $has_active_access = true;
+                $course_count = count($enrolled_courses);
+            }
+        }
+        
+        wp_send_json_success([
+            'has_access' => $has_active_access,
+            'course_count' => $course_count,
+            'status' => $has_active_access ? 'active' : 'inactive'
+        ]);
+    }
+    
+    /**
+     * Add custom columns to product list
+     */
+    public function add_product_columns($columns) {
+        $columns['learndash_access'] = 'גישת LearnDash';
+        return $columns;
+    }
+    
+    /**
+     * Show custom columns content
+     */
+    public function show_product_columns($column, $post_id) {
+        if ($column === 'learndash_access') {
+            $duration = get_post_meta($post_id, '_learndash_access_duration', true);
+            $courses = get_post_meta($post_id, '_learndash_courses', true);
+            
+            if ($duration) {
+                echo '<strong style="color: #2271b1;">' . esc_html($this->access_options[$duration] ?? $duration) . '</strong><br>';
+            }
+            
+            if ($courses && is_array($courses)) {
+                echo '<small style="color: #646970; font-size: 12px;">' . count($courses) . ' קורס(ים) מוקצה</small>';
+            } else {
+                echo '<small style="color: #646970; font-size: 12px;">לא הוגדרה גישה</small>';
+            }
+        }
+    }
+    
+    /**
+     * Display access info in order admin
+     */
+    public function display_order_access_info($order) {
+        $user_id = $order->get_user_id();
+        if (!$user_id) return;
+        
+        echo '<div class="address">';
+        echo '<p><strong>' . __('🎓 LearnDash Course Access:', 'wc-learndash') . '</strong></p>';
+        
+        $has_access = false;
+        foreach ($order->get_items() as $item) {
+            $product_id = $item->get_product_id();
+            $courses = get_post_meta($product_id, '_learndash_courses', true);
+            
+            if ($courses && is_array($courses)) {
+                $has_access = true;
+                foreach ($courses as $course_id) {
+                    $expire_key = "course_{$course_id}_access_expires";
+                    $expires = get_user_meta($user_id, $expire_key, true);
+                    $course_title = get_the_title($course_id);
+                    
+                    echo '<p style="margin: 5px 0;">';
+                    echo '<strong>' . esc_html($course_title) . '</strong><br>';
+                    if ($expires) {
+                        $is_expired = $expires < current_time('timestamp');
+                        $status = $is_expired ? '<span style="color: #d63638;">Expired</span>' : '<span style="color: #00a32a;">Active</span>';
+                        echo '<small>Expires: ' . date('Y-m-d H:i:s', $expires) . ' - ' . $status . '</small>';
+                    } else {
+                        echo '<small style="color: #2271b1;">No expiration (permanent access)</small>';
+                    }
+                    echo '</p>';
+                }
+            }
+        }
+        
+        if (!$has_access) {
+            echo '<p><small style="color: #646970;">No LearnDash access configured for this order</small></p>';
+        }
+        
+        echo '</div>';
+    }
+    
+    /**
+     * Show user access fields in profile
+     */
+    public function show_user_access_fields($user) {
+        echo '<h3>' . __('🎓 LearnDash Course Access', 'wc-learndash') . '</h3>';
+        echo '<table class="form-table">';
+        
+        // Get all user's course access
+        $user_meta = get_user_meta($user->ID);
+        $course_access = [];
+        
+        foreach ($user_meta as $key => $value) {
+            if (preg_match('/^course_(\d+)_access_expires$/', $key, $matches)) {
+                $course_id = $matches[1];
+                $course_access[$course_id] = [
+                    'expires' => $value[0],
+                    'title' => get_the_title($course_id)
+                ];
+            }
+        }
+        
+        if (!empty($course_access)) {
+            foreach ($course_access as $course_id => $data) {
+                echo '<tr>';
+                echo '<th><label>' . esc_html($data['title']) . '</label></th>';
+                echo '<td>';
+                if ($data['expires']) {
+                    $expires_date = date('Y-m-d H:i:s', $data['expires']);
+                    $is_expired = $data['expires'] < current_time('timestamp');
+                    $status = $is_expired ? '<span style="color: #d63638; font-weight: bold;">Expired</span>' : '<span style="color: #00a32a; font-weight: bold;">Active</span>';
+                    echo "Expires: {$expires_date} - {$status}";
+                } else {
+                    echo '<span style="color: #2271b1; font-weight: bold;">No expiration (permanent access)</span>';
+                }
+                echo '</td>';
+                echo '</tr>';
+            }
+        } else {
+            echo '<tr><td colspan="2"><em>No course access found</em></td></tr>';
+        }
+        
+        echo '</table>';
+    }
+    
+    /**
+     * Check if a course is set to 'Open' mode in LearnDash
+     */
+    private function is_course_open($course_id) {
+        // Get the course price type (LearnDash setting)
+        $price_type = get_post_meta($course_id, '_ld_price_type', true);
+        
+        // Check if course is set to 'open' or 'free'
+        if (in_array($price_type, ['open', 'free'])) {
+            return true;
+        }
+        
+        // Additional check: if no price type is set and no price, consider it open
+        if (empty($price_type)) {
+            $course_price = get_post_meta($course_id, '_ld_course_price', true);
+            if (empty($course_price) || $course_price === '0' || $course_price === '') {
+                return true;
+            }
+        }
+        
+        return false;
+    }
+}
+
+// Initialize the plugin
+new WC_LearnDash_Access_Manager();
+
+/**
+ * Helper function to check if user has access to course
+ */
+function wc_learndash_user_has_course_access($user_id, $course_id) {
+    $expire_key = "course_{$course_id}_access_expires";
+    $expires = get_user_meta($user_id, $expire_key, true);
+    
+    if (!$expires) {
+        return true; // No expiration set
+    }
+    
+    return $expires > current_time('timestamp');
+}
+
+/**
+ * Helper function to get user's course access end date
+ */
+function wc_learndash_get_course_access_end_date($user_id, $course_id) {
+    $expire_key = "course_{$course_id}_access_expires";
+    return get_user_meta($user_id, $expire_key, true);
+}
+
+/**
+ * Debug function - add ?debug_wc_learndash=1 to any admin page to test if plugin is loaded
+ */
+add_action('admin_init', function() {
+    if (isset($_GET['debug_wc_learndash']) && current_user_can('manage_options')) {
+        wp_die('✅ WC LearnDash Access Manager is loaded and working! You can now refresh your product edit page to see the new fields.');
+    }
+});
