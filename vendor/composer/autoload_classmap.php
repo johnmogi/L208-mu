@@ -7,10 +7,5 @@ $baseDir = dirname($vendorDir);
 
 return array(
     'Composer\\InstalledVersions' => $vendorDir . '/composer/InstalledVersions.php',
-    'Lilac\\CourseAccess\\Admin\\AdminPage' => $baseDir . '/plugins/lilac-course-access/src/Admin/AdminPage.php',
-    'Lilac\\CourseAccess\\Core\\AccessManager' => $baseDir . '/plugins/lilac-course-access/src/Core/AccessManager.php',
-    'Lilac\\CourseAccess\\Integrations\\LearnDash' => $baseDir . '/plugins/lilac-course-access/src/Integrations/LearnDash.php',
-    'Lilac\\CourseAccess\\Integrations\\WooCommerce' => $baseDir . '/plugins/lilac-course-access/src/Integrations/WooCommerce.php',
-    'Lilac\\CourseAccess\\Plugin' => $baseDir . '/plugins/lilac-course-access/src/Plugin.php',
     'Project\\MU\\Features\\CustomLogin' => $baseDir . '/src/Features/CustomLogin.php',
 );

@@ -39,11 +39,6 @@ class ComposerStaticInit559dde2816daf3b5901679fd02811060
 
     public static $classMap = array (
         'Composer\\InstalledVersions' => __DIR__ . '/..' . '/composer/InstalledVersions.php',
-        'Lilac\\CourseAccess\\Admin\\AdminPage' => __DIR__ . '/../..' . '/plugins/lilac-course-access/src/Admin/AdminPage.php',
-        'Lilac\\CourseAccess\\Core\\AccessManager' => __DIR__ . '/../..' . '/plugins/lilac-course-access/src/Core/AccessManager.php',
-        'Lilac\\CourseAccess\\Integrations\\LearnDash' => __DIR__ . '/../..' . '/plugins/lilac-course-access/src/Integrations/LearnDash.php',
-        'Lilac\\CourseAccess\\Integrations\\WooCommerce' => __DIR__ . '/../..' . '/plugins/lilac-course-access/src/Integrations/WooCommerce.php',
-        'Lilac\\CourseAccess\\Plugin' => __DIR__ . '/../..' . '/plugins/lilac-course-access/src/Plugin.php',
         'Project\\MU\\Features\\CustomLogin' => __DIR__ . '/../..' . '/src/Features/CustomLogin.php',
     );
 
