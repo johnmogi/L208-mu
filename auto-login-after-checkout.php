@@ -364,13 +364,11 @@ class Auto_Login_After_Checkout {
     }
 }
 
-// Initialize the plugin
+// Initialize the plugin and AJAX handlers
 add_action('plugins_loaded', function() {
     if (class_exists('WooCommerce')) {
-        new Auto_Login_After_Checkout();
+        $auto_login_instance = new Auto_Login_After_Checkout();
+        add_action('wp_ajax_auto_login_after_checkout', array($auto_login_instance, 'ajax_auto_login'));
+        add_action('wp_ajax_nopriv_auto_login_after_checkout', array($auto_login_instance, 'ajax_auto_login'));
     }
 });
-
-// Add AJAX handler
-add_action('wp_ajax_auto_login_after_checkout', array('Auto_Login_After_Checkout', 'ajax_auto_login'));
-add_action('wp_ajax_nopriv_auto_login_after_checkout', array('Auto_Login_After_Checkout', 'ajax_auto_login'));

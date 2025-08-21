@@ -28,11 +28,11 @@ class CheckoutCustomizer {
         // Create user and associate with order BEFORE other hooks run - V2 cache bypass
         add_action('woocommerce_checkout_order_processed', [$this, 'create_user_and_associate_order_v2'], 1);
         
-        // DISABLED: Auto-login hooks to prevent conflicts with auto-login-after-checkout.php
-        // add_action('woocommerce_order_status_completed', [$this, 'auto_login_after_purchase'], 5);
-        // add_action('woocommerce_payment_complete', [$this, 'auto_login_after_purchase'], 5);
-        // add_action('woocommerce_order_status_processing', [$this, 'auto_login_after_purchase'], 5);
-        // add_action('woocommerce_order_status_on-hold', [$this, 'auto_login_after_purchase'], 5);
+        // Enable auto-login hooks for course redirect after purchase
+        add_action('woocommerce_order_status_completed', [$this, 'auto_login_after_purchase'], 5);
+        add_action('woocommerce_payment_complete', [$this, 'auto_login_after_purchase'], 5);
+        add_action('woocommerce_order_status_processing', [$this, 'auto_login_after_purchase'], 5);
+        add_action('woocommerce_order_status_on-hold', [$this, 'auto_login_after_purchase'], 5);
         
         // Enqueue scripts and styles
         add_action('wp_enqueue_scripts', [$this, 'enqueue_assets']);
