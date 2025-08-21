@@ -161,6 +161,85 @@ jQuery(document).ready(function($) {
             });
     });
     
+    // Revoke access form
+    $('#revoke-access-form').on('submit', function(e) {
+        e.preventDefault();
+        
+        const $form = $(this);
+        const $button = $form.find('button[type="submit"]');
+        const originalText = $button.text();
+        
+        const userId = $('#revoke-user-id').val();
+        const courseId = $('#revoke-course-id').val();
+        
+        if (!userId || !courseId) {
+            alert('Please fill in both User ID and Course ID');
+            return;
+        }
+        
+        // Confirmation dialog
+        if (!confirm('Are you sure you want to revoke access? This will immediately remove the user\'s access to the course.')) {
+            return;
+        }
+        
+        $button.text('Revoking...').prop('disabled', true);
+        
+        $.post(subscriptionTracker.ajaxUrl, {
+            action: 'st_test_revoke_access',
+            nonce: subscriptionTracker.nonce,
+            user_id: userId,
+            course_id: courseId
+        })
+        .done(function(response) {
+            if (response.success) {
+                showMessage('success', response.data.message);
+                $form[0].reset();
+            } else {
+                showMessage('error', response.data || 'Failed to revoke access');
+            }
+        })
+        .fail(function() {
+            showMessage('error', 'AJAX request failed');
+        })
+        .always(function() {
+            $button.text(originalText).prop('disabled', false);
+        });
+    });
+    
+    // Import subscriptions button
+    $('#import-subscriptions-btn').on('click', function(e) {
+        e.preventDefault();
+        
+        const $button = $(this);
+        const originalText = $button.text();
+        
+        if (!confirm('This will import all existing subscription data from user meta. Continue?')) {
+            return;
+        }
+        
+        $button.text('Importing...').prop('disabled', true);
+        
+        $.post(subscriptionTracker.ajaxUrl, {
+            action: 'st_test_import_subscriptions',
+            nonce: subscriptionTracker.nonce
+        })
+        .done(function(response) {
+            if (response.success) {
+                showMessage('success', response.data.message);
+                // Refresh statistics
+                location.reload();
+            } else {
+                showMessage('error', response.data || 'Failed to import subscriptions');
+            }
+        })
+        .fail(function() {
+            showMessage('error', 'AJAX request failed');
+        })
+        .always(function() {
+            $button.text(originalText).prop('disabled', false);
+        });
+    });
+    
     // User lookup form
     $('#user-lookup-form').on('submit', function(e) {
         e.preventDefault();
@@ -267,12 +346,61 @@ jQuery(document).ready(function($) {
                         <p><strong>Expires:</strong> ${formatDate(sub.expires_date)}</p>
                         <p><strong>Duration:</strong> ${sub.access_duration_days} days</p>
                         <p><strong>Order ID:</strong> ${sub.order_id}</p>
+                        <div class="subscription-actions">
+                            <button class="button button-small revoke-subscription-btn" 
+                                    data-user-id="${data.user_name.includes('ID:') ? data.user_name.split('ID: ')[1] : ''}" 
+                                    data-course-id="${sub.course_id}" 
+                                    data-course-title="${sub.course_title}">
+                                🚫 Revoke Access
+                            </button>
+                        </div>
                     </div>
                 `;
             });
         }
         
         $container.html(html);
+        
+        // Add click handlers for revoke buttons
+        $container.find('.revoke-subscription-btn').on('click', function() {
+            const $btn = $(this);
+            const userId = $btn.data('user-id');
+            const courseId = $btn.data('course-id');
+            const courseTitle = $btn.data('course-title');
+            
+            if (!userId || !courseId) {
+                alert('Missing user or course information');
+                return;
+            }
+            
+            if (!confirm(`Are you sure you want to revoke access to "${courseTitle}"?`)) {
+                return;
+            }
+            
+            const originalText = $btn.text();
+            $btn.text('Revoking...').prop('disabled', true);
+            
+            $.post(subscriptionTracker.ajaxUrl, {
+                action: 'st_test_revoke_access',
+                nonce: subscriptionTracker.nonce,
+                user_id: userId,
+                course_id: courseId
+            })
+            .done(function(response) {
+                if (response.success) {
+                    showMessage('success', response.data.message);
+                    // Remove the subscription item from display
+                    $btn.closest('.subscription-item').fadeOut();
+                } else {
+                    showMessage('error', response.data || 'Failed to revoke access');
+                    $btn.text(originalText).prop('disabled', false);
+                }
+            })
+            .fail(function() {
+                showMessage('error', 'AJAX request failed');
+                $btn.text(originalText).prop('disabled', false);
+            });
+        });
     }
     
     function formatDate(dateString) {

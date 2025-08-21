@@ -77,6 +77,22 @@
     border-radius: 4px;
 }
 
+.revoke-tool {
+    border-left: 4px solid #d63638;
+}
+
+.revoke-tool::before {
+    background: linear-gradient(90deg, #d63638, #b32d2e);
+}
+
+.import-tool {
+    border-left: 4px solid #00a32a;
+}
+
+.import-tool::before {
+    background: linear-gradient(90deg, #00a32a, #007a1f);
+}
+
 .test-tool {
     background: #f8f9fa;
     padding: 20px;
@@ -266,6 +282,17 @@
     font-weight: 600;
 }
 
+.subscription-actions {
+    margin-top: 15px;
+    padding-top: 15px;
+    border-top: 1px solid #e1e5e9;
+    text-align: right;
+}
+
+.subscription-actions .button {
+    margin-left: 5px;
+}
+
 /* Debug Section */
 .debug-section {
     background: #f8f9fa;
@@ -319,6 +346,23 @@
 .button-secondary:hover {
     background: linear-gradient(135deg, #50575e, #3c434a);
     color: white;
+}
+
+.button-danger {
+    background: linear-gradient(135deg, #d63638, #b32d2e);
+    border-color: #b32d2e;
+    color: white;
+}
+
+.button-danger:hover {
+    background: linear-gradient(135deg, #b32d2e, #8a2424);
+    color: white;
+}
+
+.button-small {
+    padding: 4px 8px;
+    font-size: 12px;
+    line-height: 1.4;
 }
 
 /* Loading State */

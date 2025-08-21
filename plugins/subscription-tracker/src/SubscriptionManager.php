@@ -27,6 +27,8 @@ class SubscriptionManager {
         add_action('wp_ajax_st_get_user_subscriptions', [$this, 'ajaxGetUserSubscriptions']);
         add_action('wp_ajax_st_update_subscription', [$this, 'ajaxUpdateSubscription']);
         add_action('wp_ajax_st_extend_access', [$this, 'ajaxExtendAccess']);
+        add_action('wp_ajax_st_revoke_access', [$this, 'ajaxRevokeAccess']);
+        add_action('wp_ajax_st_import_existing_subscriptions', [$this, 'ajaxImportExistingSubscriptions']);
         
         // Cron for cleanup
         add_action('subscription_tracker_daily_cleanup', [$this, 'dailyCleanup']);
@@ -171,6 +173,11 @@ class SubscriptionManager {
             "SELECT * FROM {$table_name} WHERE user_id = %d ORDER BY granted_date DESC",
             $user_id
         ), ARRAY_A);
+        
+        // If no subscriptions in our table, try to import from user meta
+        if (empty($subscriptions)) {
+            $subscriptions = $this->importUserMetaSubscriptions($user_id);
+        }
         
         // Enhance with course and product info
         foreach ($subscriptions as &$subscription) {
@@ -361,5 +368,202 @@ class SubscriptionManager {
         ));
         
         $this->logAction(0, 0, 'daily_cleanup_completed');
+    }
+    
+    /**
+     * Revoke course access
+     * 
+     * @param int $user_id
+     * @param int $course_id
+     * @return bool
+     */
+    public function revokeAccess(int $user_id, int $course_id): bool {
+        // Remove from user meta
+        delete_user_meta($user_id, "course_{$course_id}_access_expires");
+        delete_user_meta($user_id, "course_{$course_id}_order_id");
+        delete_user_meta($user_id, "course_{$course_id}_product_id");
+        delete_user_meta($user_id, "course_{$course_id}_granted_date");
+        
+        // Update database status
+        global $wpdb;
+        $table_name = $wpdb->prefix . 'subscription_tracker';
+        
+        $wpdb->update(
+            $table_name,
+            ['status' => 'revoked'],
+            ['user_id' => $user_id, 'course_id' => $course_id],
+            ['%s'],
+            ['%d', '%d']
+        );
+        
+        // Remove from LearnDash
+        ld_update_course_access($user_id, $course_id, true); // true = remove access
+        
+        $this->logAction($user_id, $course_id, 'access_revoked');
+        
+        return true;
+    }
+    
+    /**
+     * Import subscriptions from user meta (for existing data)
+     * 
+     * @param int $user_id
+     * @return array
+     */
+    public function importUserMetaSubscriptions(int $user_id): array {
+        $subscriptions = [];
+        
+        // Get all user meta keys that match our pattern
+        $user_meta = get_user_meta($user_id);
+        
+        foreach ($user_meta as $key => $value) {
+            if (preg_match('/^course_(\d+)_access_expires$/', $key, $matches)) {
+                $course_id = intval($matches[1]);
+                $expires_timestamp = intval($value[0]);
+                
+                if ($expires_timestamp > 0) {
+                    $order_id = get_user_meta($user_id, "course_{$course_id}_order_id", true) ?: 0;
+                    $product_id = get_user_meta($user_id, "course_{$course_id}_product_id", true) ?: 0;
+                    $granted_timestamp = get_user_meta($user_id, "course_{$course_id}_granted_date", true) ?: time();
+                    
+                    $subscription = [
+                        'id' => 0, // No DB record yet
+                        'user_id' => $user_id,
+                        'course_id' => $course_id,
+                        'order_id' => intval($order_id),
+                        'product_id' => intval($product_id),
+                        'granted_date' => date('Y-m-d H:i:s', $granted_timestamp),
+                        'expires_date' => date('Y-m-d H:i:s', $expires_timestamp),
+                        'status' => $expires_timestamp > time() ? 'active' : 'expired',
+                        'access_duration_days' => ceil(($expires_timestamp - $granted_timestamp) / DAY_IN_SECONDS),
+                        'created_at' => date('Y-m-d H:i:s', $granted_timestamp),
+                        'updated_at' => date('Y-m-d H:i:s')
+                    ];
+                    
+                    $subscriptions[] = $subscription;
+                }
+            }
+        }
+        
+        return $subscriptions;
+    }
+    
+    /**
+     * Import all existing subscriptions from user meta to database
+     * 
+     * @return array Statistics about import
+     */
+    public function importAllExistingSubscriptions(): array {
+        global $wpdb;
+        
+        $stats = ['imported' => 0, 'skipped' => 0, 'errors' => 0];
+        
+        // Get all users with course access meta
+        $results = $wpdb->get_results(
+            "SELECT user_id, meta_key, meta_value 
+             FROM {$wpdb->usermeta} 
+             WHERE meta_key LIKE 'course_%_access_expires'",
+            ARRAY_A
+        );
+        
+        foreach ($results as $row) {
+            if (preg_match('/^course_(\d+)_access_expires$/', $row['meta_key'], $matches)) {
+                $user_id = intval($row['user_id']);
+                $course_id = intval($matches[1]);
+                $expires_timestamp = intval($row['meta_value']);
+                
+                if ($expires_timestamp > 0) {
+                    // Check if already exists in our table
+                    $table_name = $wpdb->prefix . 'subscription_tracker';
+                    $exists = $wpdb->get_var($wpdb->prepare(
+                        "SELECT id FROM {$table_name} WHERE user_id = %d AND course_id = %d",
+                        $user_id, $course_id
+                    ));
+                    
+                    if (!$exists) {
+                        $order_id = get_user_meta($user_id, "course_{$course_id}_order_id", true) ?: 0;
+                        $product_id = get_user_meta($user_id, "course_{$course_id}_product_id", true) ?: 0;
+                        $granted_timestamp = get_user_meta($user_id, "course_{$course_id}_granted_date", true) ?: time();
+                        
+                        $result = $wpdb->insert(
+                            $table_name,
+                            [
+                                'user_id' => $user_id,
+                                'course_id' => $course_id,
+                                'order_id' => intval($order_id),
+                                'product_id' => intval($product_id),
+                                'granted_date' => date('Y-m-d H:i:s', $granted_timestamp),
+                                'expires_date' => date('Y-m-d H:i:s', $expires_timestamp),
+                                'status' => $expires_timestamp > time() ? 'active' : 'expired',
+                                'access_duration_days' => ceil(($expires_timestamp - $granted_timestamp) / DAY_IN_SECONDS)
+                            ],
+                            ['%d', '%d', '%d', '%d', '%s', '%s', '%s', '%d']
+                        );
+                        
+                        if ($result) {
+                            $stats['imported']++;
+                        } else {
+                            $stats['errors']++;
+                        }
+                    } else {
+                        $stats['skipped']++;
+                    }
+                }
+            }
+        }
+        
+        return $stats;
+    }
+    
+    /**
+     * AJAX: Revoke access
+     */
+    public function ajaxRevokeAccess(): void {
+        check_ajax_referer('subscription_tracker_nonce', 'nonce');
+        
+        if (!current_user_can('manage_options')) {
+            wp_send_json_error('Insufficient permissions');
+            return;
+        }
+        
+        $user_id = intval($_POST['user_id'] ?? 0);
+        $course_id = intval($_POST['course_id'] ?? 0);
+        
+        if (!$user_id || !$course_id) {
+            wp_send_json_error('Missing required parameters');
+            return;
+        }
+        
+        $success = $this->revokeAccess($user_id, $course_id);
+        
+        if ($success) {
+            wp_send_json_success('Access revoked successfully');
+        } else {
+            wp_send_json_error('Failed to revoke access');
+        }
+    }
+    
+    /**
+     * AJAX: Import existing subscriptions
+     */
+    public function ajaxImportExistingSubscriptions(): void {
+        check_ajax_referer('subscription_tracker_nonce', 'nonce');
+        
+        if (!current_user_can('manage_options')) {
+            wp_send_json_error('Insufficient permissions');
+            return;
+        }
+        
+        $stats = $this->importAllExistingSubscriptions();
+        
+        wp_send_json_success([
+            'message' => sprintf(
+                'Import completed: %d imported, %d skipped, %d errors',
+                $stats['imported'],
+                $stats['skipped'],
+                $stats['errors']
+            ),
+            'stats' => $stats
+        ]);
     }
 }

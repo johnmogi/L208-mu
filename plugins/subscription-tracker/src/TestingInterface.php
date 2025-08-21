@@ -22,6 +22,8 @@ class TestingInterface {
         add_action('wp_ajax_st_get_statistics', [$this, 'ajaxGetStatistics']);
         add_action('wp_ajax_st_search_users', [$this, 'ajaxSearchUsers']);
         add_action('wp_ajax_st_get_courses', [$this, 'ajaxGetCourses']);
+        add_action('wp_ajax_st_test_revoke_access', [$this, 'ajaxTestRevokeAccess']);
+        add_action('wp_ajax_st_test_import_subscriptions', [$this, 'ajaxTestImportSubscriptions']);
     }
     
     /**
@@ -134,6 +136,35 @@ class TestingInterface {
                                 <button type="submit" class="button button-secondary">Extend Access</button>
                             </p>
                         </form>
+                    </div>
+                    
+                    <!-- Revoke Access Tool -->
+                    <div class="test-tool revoke-tool">
+                        <h3>🚫 Revoke Course Access</h3>
+                        <form id="revoke-access-form">
+                            <table class="form-table">
+                                <tr>
+                                    <th><label for="revoke-user-id">User ID</label></th>
+                                    <td><input type="number" id="revoke-user-id" name="user_id" required /></td>
+                                </tr>
+                                <tr>
+                                    <th><label for="revoke-course-id">Course ID</label></th>
+                                    <td><input type="number" id="revoke-course-id" name="course_id" required /></td>
+                                </tr>
+                            </table>
+                            <p class="submit">
+                                <button type="submit" class="button button-danger">Revoke Access</button>
+                            </p>
+                        </form>
+                    </div>
+                    
+                    <!-- Import Existing Subscriptions -->
+                    <div class="test-tool import-tool">
+                        <h3>📥 Import Existing Subscriptions</h3>
+                        <p>Import subscriptions from existing user meta data to populate the database.</p>
+                        <p class="submit">
+                            <button id="import-subscriptions-btn" class="button button-secondary">Import All Existing Subscriptions</button>
+                        </p>
                     </div>
                 </div>
                 
@@ -515,5 +546,73 @@ class TestingInterface {
         }
         
         wp_send_json_success($results);
+    }
+    
+    /**
+     * AJAX: Test revoke access
+     */
+    public function ajaxTestRevokeAccess(): void {
+        check_ajax_referer('subscription_tracker_nonce', 'nonce');
+        
+        if (!current_user_can('manage_options')) {
+            wp_send_json_error('Insufficient permissions');
+            return;
+        }
+        
+        $user_id = intval($_POST['user_id'] ?? 0);
+        $course_id = intval($_POST['course_id'] ?? 0);
+        
+        if (!$user_id || !$course_id) {
+            wp_send_json_error('Missing required parameters');
+            return;
+        }
+        
+        $user = get_user_by('id', $user_id);
+        $course = get_post($course_id);
+        
+        if (!$user || !$course || $course->post_type !== 'sfwd-courses') {
+            wp_send_json_error('Invalid user or course');
+            return;
+        }
+        
+        $subscription_manager = new SubscriptionManager();
+        $success = $subscription_manager->revokeAccess($user_id, $course_id);
+        
+        if ($success) {
+            wp_send_json_success([
+                'message' => sprintf(
+                    'Access revoked for %s from course "%s"',
+                    $user->display_name,
+                    $course->post_title
+                )
+            ]);
+        } else {
+            wp_send_json_error('Failed to revoke access');
+        }
+    }
+    
+    /**
+     * AJAX: Test import subscriptions
+     */
+    public function ajaxTestImportSubscriptions(): void {
+        check_ajax_referer('subscription_tracker_nonce', 'nonce');
+        
+        if (!current_user_can('manage_options')) {
+            wp_send_json_error('Insufficient permissions');
+            return;
+        }
+        
+        $subscription_manager = new SubscriptionManager();
+        $stats = $subscription_manager->importAllExistingSubscriptions();
+        
+        wp_send_json_success([
+            'message' => sprintf(
+                'Import completed: %d imported, %d skipped, %d errors',
+                $stats['imported'],
+                $stats['skipped'],
+                $stats['errors']
+            ),
+            'stats' => $stats
+        ]);
     }
 }
