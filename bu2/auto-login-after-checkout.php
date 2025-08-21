@@ -65,6 +65,12 @@ class Auto_Login_After_Checkout {
             error_log('Order ID: ' . $order_id);
             error_log('Order Status: ' . $order->get_status());
             
+            // Store order ID in session for user field population
+            if (!session_id()) {
+                session_start();
+            }
+            $_SESSION['current_order_id'] = $order_id;
+            
             // Enhanced server status debugging
             error_log('=== SERVER STATUS DEBUG ===');
             error_log('PHP Memory Limit: ' . ini_get('memory_limit'));
@@ -150,6 +156,8 @@ class Auto_Login_After_Checkout {
                 $user = get_user_by('login', $legacy_username);
                 if ($user) {
                     error_log('AUTO LOGIN: Found legacy prefixed username: ' . $legacy_username);
+                    // Update legacy user to remove prefix
+                    $this->update_legacy_user($user, $username);
                 }
             }
             if (!$user && $phone !== $username) {
@@ -288,9 +296,82 @@ class Auto_Login_After_Checkout {
         $user = new WP_User($user_id);
         $user->set_role('customer');
         
+        // Populate user fields from order data
+        $this->populate_user_fields($user_id);
+        
         error_log('User created successfully. ID: ' . $user_id);
         
         return $user_id;
+    }
+    
+    /**
+     * Update legacy user to remove user_ prefix and populate fields
+     */
+    private function update_legacy_user($user, $new_username) {
+        error_log('Updating legacy user from ' . $user->user_login . ' to ' . $new_username);
+        
+        // Update username
+        wp_update_user(array(
+            'ID' => $user->ID,
+            'user_login' => $new_username
+        ));
+        
+        // Populate missing user fields
+        $this->populate_user_fields($user->ID);
+        
+        error_log('Legacy user updated successfully');
+    }
+    
+    /**
+     * Populate user fields from current order context
+     */
+    private function populate_user_fields($user_id) {
+        // Get current order from global context or session
+        global $woocommerce;
+        
+        // Try to get order from various sources
+        $order = null;
+        if (isset($_SESSION['current_order_id'])) {
+            $order = wc_get_order($_SESSION['current_order_id']);
+        }
+        
+        // If no order found, try to get the most recent order for this user
+        if (!$order) {
+            $orders = wc_get_orders(array(
+                'customer_id' => $user_id,
+                'limit' => 1,
+                'orderby' => 'date',
+                'order' => 'DESC'
+            ));
+            if (!empty($orders)) {
+                $order = $orders[0];
+            }
+        }
+        
+        if ($order) {
+            $first_name = $order->get_billing_first_name();
+            $last_name = $order->get_billing_last_name();
+            $phone = $order->get_billing_phone();
+            
+            // Update user meta
+            update_user_meta($user_id, 'first_name', $first_name);
+            update_user_meta($user_id, 'last_name', $last_name);
+            update_user_meta($user_id, 'billing_first_name', $first_name);
+            update_user_meta($user_id, 'billing_last_name', $last_name);
+            update_user_meta($user_id, 'billing_phone', $phone);
+            
+            // Update display name
+            $display_name = trim($first_name . ' ' . $last_name);
+            if (!empty($display_name)) {
+                wp_update_user(array(
+                    'ID' => $user_id,
+                    'display_name' => $display_name,
+                    'nickname' => $display_name
+                ));
+            }
+            
+            error_log('Populated user fields for user ' . $user_id . ': ' . $display_name);
+        }
     }
     
     /**

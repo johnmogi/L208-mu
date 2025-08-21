@@ -64,16 +64,16 @@ class WC_LearnDash_Access_Manager {
             return;
         }
         
-        // Use lower priority to avoid interfering with checkout process
-        add_action('woocommerce_payment_complete', array($this, 'enroll_user_in_courses_once'), 20, 1);
+        // Use lower priority to avoid interfering with checkout process - DISABLED to prevent conflicts
+        // add_action('woocommerce_payment_complete', array($this, 'enroll_user_in_courses_once'), 20, 1);
         
         // Add product fields
         add_action('woocommerce_product_options_general_product_data', [$this, 'add_custom_fields']);
         add_action('woocommerce_process_product_meta', [$this, 'save_custom_fields']);
         
-        // Main order processing hooks
-        add_action('woocommerce_order_status_completed', [$this, 'handle_order_completion']);
-        add_action('woocommerce_payment_complete', [$this, 'handle_payment_completion']);
+        // Main order processing hooks - DISABLED to prevent conflicts with Lilac Course Access plugin
+        // add_action('woocommerce_order_status_completed', [$this, 'handle_order_completion']);
+        // add_action('woocommerce_payment_complete', [$this, 'handle_payment_completion']);
         
         // Handle post-purchase redirection
         add_action('woocommerce_thankyou', [$this, 'handle_post_purchase_redirect'], 10, 1);

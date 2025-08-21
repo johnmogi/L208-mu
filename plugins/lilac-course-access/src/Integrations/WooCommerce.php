@@ -47,9 +47,10 @@ class WooCommerce {
         add_action('woocommerce_product_options_general_product_data', [$this, 'addCustomFields']);
         add_action('woocommerce_process_product_meta', [$this, 'saveCustomFields']);
         
-        // Order processing - DISABLED to prevent conflicts with main wc-learndash-access-manager
-        // add_action('woocommerce_order_status_completed', [$this, 'handleOrderCompletion'], 10, 1);
-        // add_action('woocommerce_payment_complete', [$this, 'handlePaymentComplete'], 10, 1);
+        // Order processing - ENABLED for proper course access management
+        add_action('woocommerce_order_status_completed', [$this, 'handleOrderCompletion'], 10, 1);
+        add_action('woocommerce_payment_complete', [$this, 'handlePaymentComplete'], 10, 1);
+        add_action('woocommerce_checkout_order_processed', [$this, 'handleOrderCompletion'], 10, 1);
         
         // Product columns
         add_filter('manage_edit-product_columns', [$this, 'addProductColumns']);
