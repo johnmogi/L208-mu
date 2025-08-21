@@ -241,6 +241,11 @@ jQuery(document).ready(function($) {
     });
     
     // Load recent subscriptions
+    $('#load-recent-subscriptions').on('click', function(e) {
+        loadRecentSubscriptions();
+    });
+    
+    // Load recent subscriptions (legacy handler)
     $('#load-recent-btn').on('click', function(e) {
         e.preventDefault();
         
@@ -269,6 +274,103 @@ jQuery(document).ready(function($) {
         .always(function() {
             $button.text(originalText).prop('disabled', false);
         });
+    });
+    
+    // Load recent subscriptions function
+    function loadRecentSubscriptions() {
+        const $container = $('#recent-subscriptions-container');
+        const $button = $('#load-recent-subscriptions');
+        const originalText = $button.text();
+        
+        $button.text('טוען...').prop('disabled', true);
+        
+        // Hide other sections
+        $('#students-list-container').hide();
+        $('#product-links-section').hide();
+        
+        $.ajax({
+            url: ajaxurl,
+            type: 'POST',
+            data: {
+                action: 'st_load_recent_subscriptions',
+                nonce: subscriptionTracker.nonce
+            },
+            success: function(response) {
+                if (response.success) {
+                    displayRecentSubscriptions(response.data, $container);
+                    $container.show();
+                } else {
+                    showMessage('error', response.data || 'Failed to load recent subscriptions');
+                }
+            },
+            error: function() {
+                showMessage('error', 'AJAX request failed');
+            },
+            complete: function() {
+                $button.text(originalText).prop('disabled', false);
+            }
+        });
+    }
+    
+    // Load students list
+    $('#load-students-list').on('click', function() {
+        loadStudentsList();
+    });
+    
+    // Load students list function
+    function loadStudentsList() {
+        const $container = $('#students-list-container');
+        const $button = $('#load-students-list');
+        const originalText = $button.text();
+        
+        $button.text('טוען...').prop('disabled', true);
+        
+        // Hide other sections
+        $('#recent-subscriptions-container').hide();
+        $('#product-links-section').hide();
+        
+        $.ajax({
+            url: ajaxurl,
+            type: 'POST',
+            data: {
+                action: 'st_load_students',
+                nonce: subscriptionTracker.nonce
+            },
+            success: function(response) {
+                if (response.success) {
+                    displayStudentsList(response.data, $container);
+                    $container.show();
+                } else {
+                    showMessage('error', response.data || 'Failed to load students');
+                }
+            },
+            error: function() {
+                showMessage('error', 'AJAX request failed');
+            },
+            complete: function() {
+                $button.text(originalText).prop('disabled', false);
+            }
+        });
+    }
+    
+    // Manage product links
+    $('#manage-product-links').on('click', function() {
+        toggleProductLinksSection();
+    });
+    
+    // Course selection change
+    $('#course-select').on('change', function() {
+        updateCurrentLinkInfo();
+    });
+    
+    // Save product link
+    $('#save-product-link').on('click', function() {
+        saveProductLink();
+    });
+    
+    // Remove product link
+    $('#remove-product-link').on('click', function() {
+        removeProductLink();
     });
     
     // Load students list
@@ -682,5 +784,126 @@ jQuery(document).ready(function($) {
                 $(this).remove();
             });
         }, 5000);
+    }
+    
+    // Toggle product links section
+    function toggleProductLinksSection() {
+        const section = $('#product-links-section');
+        const container = $('#product-links-container');
+        
+        if (section.is(':visible')) {
+            section.hide();
+            container.hide();
+        } else {
+            // Hide other sections
+            $('#recent-subscriptions-container').hide();
+            $('#students-list-container').hide();
+            
+            section.show();
+            container.show();
+        }
+    }
+    
+    // Update current link info when course is selected
+    function updateCurrentLinkInfo() {
+        const courseSelect = $('#course-select');
+        const selectedOption = courseSelect.find(':selected');
+        const currentProductId = selectedOption.data('current-product');
+        const infoBox = $('#current-link-info');
+        const infoText = $('#current-link-text');
+        
+        if (currentProductId) {
+            const productName = $('#product-select option[value="' + currentProductId + '"]').text();
+            infoText.text('קורס זה מקושר למוצר: ' + productName);
+            infoBox.show();
+            $('#product-select').val(currentProductId);
+        } else {
+            infoBox.hide();
+            $('#product-select').val('');
+        }
+    }
+    
+    // Save product link
+    function saveProductLink() {
+        const courseId = $('#course-select').val();
+        const productId = $('#product-select').val();
+        const button = $('#save-product-link');
+        
+        if (!courseId || !productId) {
+            alert('אנא בחר קורס ומוצר');
+            return;
+        }
+        
+        button.prop('disabled', true).text('שומר...');
+        
+        $.ajax({
+            url: ajaxurl,
+            type: 'POST',
+            data: {
+                action: 'st_save_course_product_link',
+                course_id: courseId,
+                product_id: productId,
+                nonce: subscriptionTracker.nonce
+            },
+            success: function(response) {
+                if (response.success) {
+                    alert('הקישור נשמר בהצלחה!');
+                    // Update the current product data attribute
+                    $('#course-select option:selected').attr('data-current-product', productId);
+                    updateCurrentLinkInfo();
+                } else {
+                    alert('שגיאה: ' + response.data);
+                }
+            },
+            error: function() {
+                alert('שגיאה בשמירת הקישור');
+            },
+            complete: function() {
+                button.prop('disabled', false).text('💾 שמור קישור');
+            }
+        });
+    }
+    
+    // Remove product link
+    function removeProductLink() {
+        const courseId = $('#course-select').val();
+        const button = $('#remove-product-link');
+        
+        if (!courseId) {
+            alert('אנא בחר קורס');
+            return;
+        }
+        
+        if (!confirm('האם אתה בטוח שברצונך להסיר את הקישור?')) {
+            return;
+        }
+        
+        button.prop('disabled', true).text('מסיר...');
+        
+        $.ajax({
+            url: ajaxurl,
+            type: 'POST',
+            data: {
+                action: 'st_remove_course_product_link',
+                course_id: courseId,
+                nonce: subscriptionTracker.nonce
+            },
+            success: function(response) {
+                if (response.success) {
+                    alert('הקישור הוסר בהצלחה!');
+                    // Update the current product data attribute
+                    $('#course-select option:selected').attr('data-current-product', '');
+                    updateCurrentLinkInfo();
+                } else {
+                    alert('שגיאה: ' + response.data);
+                }
+            },
+            error: function() {
+                alert('שגיאה בהסרת הקישור');
+            },
+            complete: function() {
+                button.prop('disabled', false).text('🗑️ הסר קישור');
+            }
+        });
     }
 });

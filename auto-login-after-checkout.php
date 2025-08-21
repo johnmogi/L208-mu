@@ -143,17 +143,62 @@ class Auto_Login_After_Checkout {
             // Sanitize phone number for username
             $username = $this->sanitize_phone_for_username($phone);
             
-            // Check if user exists, if not create one
-            $user = get_user_by('login', $username);
-            
+            // Backward-compatible user lookup sequence
+            $user = get_user_by('login', $username); // new standard e.g., 0501234567
+            if (!$user) {
+                $legacy_username = 'user_' . $username; // legacy format
+                $user = get_user_by('login', $legacy_username);
+                if ($user) {
+                    error_log('AUTO LOGIN: Found legacy prefixed username: ' . $legacy_username);
+                }
+            }
+            if (!$user && $phone !== $username) {
+                // Try raw phone as entered (in case older flows used unsanitized phone)
+                $user = get_user_by('login', $phone);
+                if ($user) {
+                    error_log('AUTO LOGIN: Found user by raw phone login: ' . $phone);
+                }
+            }
+            if (!$user) {
+                // As a last pre-create check, try by billing email
+                $user = get_user_by('email', $order->get_billing_email());
+                if ($user) {
+                    error_log('AUTO LOGIN: Found existing user by billing email before create. ID: ' . $user->ID);
+                }
+            }
+
+            // Create user if still not found
             if (!$user) {
                 $user_id = $this->create_user($username, $order->get_billing_email(), $id_number);
                 if (is_wp_error($user_id)) {
-                    error_log('AUTO LOGIN: Error creating user - ' . $user_id->get_error_message());
-                    return;
+                    $err_msg = $user_id->get_error_message();
+                    error_log('AUTO LOGIN: Error creating user - ' . $err_msg);
+                    // If email already exists, fetch by email and continue
+                    if ($user_id->get_error_code() === 'existing_user_email') {
+                        $user = get_user_by('email', $order->get_billing_email());
+                        if ($user) {
+                            error_log('AUTO LOGIN: Using existing user by email after create error. ID: ' . $user->ID);
+                        } else {
+                            return; // cannot proceed
+                        }
+                    } elseif ($user_id->get_error_code() === 'existing_user_login') {
+                        // Username exists but we didn't find it earlier; try fetching explicitly
+                        $user = get_user_by('login', $username);
+                        if (!$user) {
+                            $user = get_user_by('login', 'user_' . $username);
+                        }
+                        if ($user) {
+                            error_log('AUTO LOGIN: Using existing user by login after create error. ID: ' . $user->ID);
+                        } else {
+                            return;
+                        }
+                    } else {
+                        return;
+                    }
+                } else {
+                    $user = get_user_by('id', $user_id);
+                    error_log("AUTO LOGIN: Created new user ID: $user_id");
                 }
-                $user = get_user_by('id', $user_id);
-                error_log("AUTO LOGIN: Created new user ID: $user_id");
             } else {
                 error_log("AUTO LOGIN: Found existing user ID: " . $user->ID);
             }
@@ -215,8 +260,8 @@ class Auto_Login_After_Checkout {
     private function sanitize_phone_for_username($phone) {
         // Remove all non-numeric characters
         $username = preg_replace('/[^0-9]/', '', $phone);
-        // Ensure it's not empty and add a prefix to ensure it's valid
-        return 'user_' . $username;
+        // Return phone number directly without user_ prefix
+        return $username;
     }
     
     /**

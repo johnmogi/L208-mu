@@ -486,10 +486,41 @@
 }
 
 .recent-controls {
-    margin: 15px 0;
     display: flex;
     gap: 10px;
+    margin-bottom: 20px;
     flex-wrap: wrap;
+}
+
+.product-links-main-section {
+    background: #fff;
+    border: 1px solid #c3c4c7;
+    border-left: 4px solid #2271b1;
+    padding: 20px;
+    margin-bottom: 30px;
+    border-radius: 4px;
+    box-shadow: 0 1px 1px rgba(0,0,0,.04);
+}
+
+.product-links-main-section h2 {
+    margin-top: 0;
+    color: #1d2327;
+    font-size: 24px;
+}
+
+.section-description {
+    color: #646970;
+    font-size: 14px;
+    margin-bottom: 20px;
+    line-height: 1.5;
+}
+
+.button-large {
+    height: auto;
+    line-height: 1;
+    padding: 12px 24px;
+    font-size: 16px;
+    font-weight: 600;
 }
 
 .recent-container,
@@ -599,6 +630,19 @@
     
     .recent-controls {
         flex-direction: column;
+    }
+    
+    .product-links-main-section {
+        padding: 15px;
+    }
+    
+    .product-links-main-section h2 {
+        font-size: 20px;
+    }
+    
+    .button-large {
+        width: 100%;
+        text-align: center;
     }
     
     .subscription-header {
