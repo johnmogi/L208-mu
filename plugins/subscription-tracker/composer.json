@@ -1,0 +1,25 @@
+{
+    "name": "lilac/subscription-tracker",
+    "description": "Modern PSR-4 subscription tracking plugin for LearnDash and WooCommerce integration",
+    "type": "wordpress-plugin",
+    "version": "1.0.0",
+    "license": "GPL-2.0-or-later",
+    "authors": [
+        {
+            "name": "Lilac Development Team",
+            "email": "dev@lilac.local"
+        }
+    ],
+    "require": {
+        "php": ">=7.4"
+    },
+    "autoload": {
+        "psr-4": {
+            "Lilac\\SubscriptionTracker\\": "src/"
+        }
+    },
+    "config": {
+        "optimize-autoloader": true,
+        "sort-packages": true
+    }
+}

@@ -1,0 +1,100 @@
+/* Subscription Tracker Frontend Styles */
+
+.subscription-status-widget {
+    background: #fff;
+    border: 1px solid #e1e5e9;
+    border-radius: 6px;
+    padding: 20px;
+    margin: 20px 0;
+    box-shadow: 0 2px 4px rgba(0,0,0,.05);
+}
+
+.subscription-status-widget h3 {
+    margin: 0 0 15px 0;
+    color: #1d2327;
+    font-size: 18px;
+    font-weight: 600;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+}
+
+.subscription-status-widget h3::before {
+    content: '🎯';
+    font-size: 16px;
+}
+
+.subscription-list {
+    list-style: none;
+    padding: 0;
+    margin: 0;
+}
+
+.subscription-item {
+    padding: 15px;
+    margin: 10px 0;
+    background: #f8f9fa;
+    border-radius: 4px;
+    border-left: 4px solid #0073aa;
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+}
+
+.subscription-item.expired {
+    border-left-color: #d63638;
+    background: #fef7f7;
+}
+
+.subscription-item.expiring {
+    border-left-color: #dba617;
+    background: #fffbf0;
+}
+
+.subscription-info h4 {
+    margin: 0 0 5px 0;
+    color: #1d2327;
+    font-size: 16px;
+    font-weight: 600;
+}
+
+.subscription-info p {
+    margin: 0;
+    color: #646970;
+    font-size: 14px;
+}
+
+.subscription-status {
+    text-align: right;
+    font-weight: 600;
+}
+
+.subscription-status.active {
+    color: #00a32a;
+}
+
+.subscription-status.expired {
+    color: #d63638;
+}
+
+.subscription-status.expiring {
+    color: #dba617;
+}
+
+.days-remaining {
+    font-size: 12px;
+    color: #646970;
+    font-weight: normal;
+}
+
+@media (max-width: 768px) {
+    .subscription-item {
+        flex-direction: column;
+        align-items: flex-start;
+        gap: 10px;
+    }
+    
+    .subscription-status {
+        text-align: left;
+    }
+}
