@@ -29,6 +29,8 @@ class SubscriptionManager {
         add_action('wp_ajax_st_extend_access', [$this, 'ajaxExtendAccess']);
         add_action('wp_ajax_st_revoke_access', [$this, 'ajaxRevokeAccess']);
         add_action('wp_ajax_st_import_existing_subscriptions', [$this, 'ajaxImportExistingSubscriptions']);
+        add_action('wp_ajax_st_get_recent_subscriptions', [$this, 'ajaxGetRecentSubscriptions']);
+        add_action('wp_ajax_st_get_all_students', [$this, 'ajaxGetAllStudents']);
         
         // Cron for cleanup
         add_action('subscription_tracker_daily_cleanup', [$this, 'dailyCleanup']);
@@ -565,5 +567,184 @@ class SubscriptionManager {
             ),
             'stats' => $stats
         ]);
+    }
+    
+    /**
+     * Get recent subscriptions
+     * 
+     * @param int $limit
+     * @return array
+     */
+    public function getRecentSubscriptions(int $limit = 5): array {
+        global $wpdb;
+        $table_name = $wpdb->prefix . 'subscription_tracker';
+        
+        $subscriptions = $wpdb->get_results($wpdb->prepare(
+            "SELECT * FROM {$table_name} ORDER BY granted_date DESC LIMIT %d",
+            $limit
+        ), ARRAY_A);
+        
+        // If no subscriptions in table, try to get from user meta
+        if (empty($subscriptions)) {
+            $subscriptions = $this->getRecentSubscriptionsFromMeta($limit);
+        }
+        
+        // Enhance with user, course and product info
+        foreach ($subscriptions as &$subscription) {
+            $user = get_user_by('id', $subscription['user_id']);
+            $course = get_post($subscription['course_id']);
+            $product = wc_get_product($subscription['product_id']);
+            
+            $subscription['user_name'] = $user ? $user->display_name : 'Unknown User';
+            $subscription['user_email'] = $user ? $user->user_email : '';
+            $subscription['course_title'] = $course ? $course->post_title : 'Unknown Course';
+            $subscription['product_name'] = $product ? $product->get_name() : 'Unknown Product';
+            $subscription['is_expired'] = strtotime($subscription['expires_date']) < time();
+            $subscription['days_remaining'] = max(0, ceil((strtotime($subscription['expires_date']) - time()) / DAY_IN_SECONDS));
+        }
+        
+        return $subscriptions;
+    }
+    
+    /**
+     * Get recent subscriptions from user meta (fallback)
+     * 
+     * @param int $limit
+     * @return array
+     */
+    private function getRecentSubscriptionsFromMeta(int $limit = 5): array {
+        global $wpdb;
+        
+        $results = $wpdb->get_results(
+            "SELECT user_id, meta_key, meta_value 
+             FROM {$wpdb->usermeta} 
+             WHERE meta_key LIKE 'course_%_access_expires'
+             ORDER BY user_id DESC
+             LIMIT 20",
+            ARRAY_A
+        );
+        
+        $subscriptions = [];
+        foreach ($results as $row) {
+            if (preg_match('/^course_(\\d+)_access_expires$/', $row['meta_key'], $matches)) {
+                $user_id = intval($row['user_id']);
+                $course_id = intval($matches[1]);
+                $expires_timestamp = intval($row['meta_value']);
+                
+                if ($expires_timestamp > 0) {
+                    $order_id = get_user_meta($user_id, "course_{$course_id}_order_id", true) ?: 0;
+                    $product_id = get_user_meta($user_id, "course_{$course_id}_product_id", true) ?: 0;
+                    $granted_timestamp = get_user_meta($user_id, "course_{$course_id}_granted_date", true) ?: time();
+                    
+                    $subscriptions[] = [
+                        'id' => 0,
+                        'user_id' => $user_id,
+                        'course_id' => $course_id,
+                        'order_id' => intval($order_id),
+                        'product_id' => intval($product_id),
+                        'granted_date' => date('Y-m-d H:i:s', $granted_timestamp),
+                        'expires_date' => date('Y-m-d H:i:s', $expires_timestamp),
+                        'status' => $expires_timestamp > time() ? 'active' : 'expired',
+                        'access_duration_days' => ceil(($expires_timestamp - $granted_timestamp) / DAY_IN_SECONDS)
+                    ];
+                    
+                    if (count($subscriptions) >= $limit) {
+                        break;
+                    }
+                }
+            }
+        }
+        
+        return $subscriptions;
+    }
+    
+    /**
+     * Get all students with subscriptions
+     * 
+     * @return array
+     */
+    public function getAllStudents(): array {
+        global $wpdb;
+        $table_name = $wpdb->prefix . 'subscription_tracker';
+        
+        // Get users from subscription table
+        $user_ids = $wpdb->get_col(
+            "SELECT DISTINCT user_id FROM {$table_name} ORDER BY user_id DESC"
+        );
+        
+        // If no users in table, get from user meta
+        if (empty($user_ids)) {
+            $user_ids = $wpdb->get_col(
+                "SELECT DISTINCT user_id FROM {$wpdb->usermeta} 
+                 WHERE meta_key LIKE 'course_%_access_expires'
+                 ORDER BY user_id DESC
+                 LIMIT 50"
+            );
+        }
+        
+        $students = [];
+        foreach ($user_ids as $user_id) {
+            $user = get_user_by('id', $user_id);
+            if ($user) {
+                $subscription_count = $wpdb->get_var($wpdb->prepare(
+                    "SELECT COUNT(*) FROM {$table_name} WHERE user_id = %d",
+                    $user_id
+                ));
+                
+                // If no count from table, check user meta
+                if (!$subscription_count) {
+                    $meta_count = $wpdb->get_var($wpdb->prepare(
+                        "SELECT COUNT(*) FROM {$wpdb->usermeta} 
+                         WHERE user_id = %d AND meta_key LIKE 'course_%%_access_expires'",
+                        $user_id
+                    ));
+                    $subscription_count = $meta_count;
+                }
+                
+                $students[] = [
+                    'id' => $user->ID,
+                    'name' => $user->display_name,
+                    'email' => $user->user_email,
+                    'login' => $user->user_login,
+                    'subscription_count' => intval($subscription_count),
+                    'registered' => $user->user_registered
+                ];
+            }
+        }
+        
+        return $students;
+    }
+    
+    /**
+     * AJAX: Get recent subscriptions
+     */
+    public function ajaxGetRecentSubscriptions(): void {
+        check_ajax_referer('subscription_tracker_nonce', 'nonce');
+        
+        if (!current_user_can('manage_options')) {
+            wp_send_json_error('Insufficient permissions');
+            return;
+        }
+        
+        $limit = intval($_POST['limit'] ?? 5);
+        $limit = min(max($limit, 1), 20); // Between 1 and 20
+        
+        $subscriptions = $this->getRecentSubscriptions($limit);
+        wp_send_json_success($subscriptions);
+    }
+    
+    /**
+     * AJAX: Get all students
+     */
+    public function ajaxGetAllStudents(): void {
+        check_ajax_referer('subscription_tracker_nonce', 'nonce');
+        
+        if (!current_user_can('manage_options')) {
+            wp_send_json_error('Insufficient permissions');
+            return;
+        }
+        
+        $students = $this->getAllStudents();
+        wp_send_json_success($students);
     }
 }

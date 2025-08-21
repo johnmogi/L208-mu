@@ -24,6 +24,8 @@ class TestingInterface {
         add_action('wp_ajax_st_get_courses', [$this, 'ajaxGetCourses']);
         add_action('wp_ajax_st_test_revoke_access', [$this, 'ajaxTestRevokeAccess']);
         add_action('wp_ajax_st_test_import_subscriptions', [$this, 'ajaxTestImportSubscriptions']);
+        add_action('wp_ajax_st_load_recent_subscriptions', [$this, 'ajaxLoadRecentSubscriptions']);
+        add_action('wp_ajax_st_load_students', [$this, 'ajaxLoadStudents']);
     }
     
     /**
@@ -58,6 +60,17 @@ class TestingInterface {
                             <p>Expiring Soon (7 days)</p>
                         </div>
                     </div>
+                </div>
+                
+                <!-- Recent Subscriptions -->
+                <div class="recent-section">
+                    <h2>🕒 Recent Subscriptions</h2>
+                    <div class="recent-controls">
+                        <button id="load-recent-btn" class="button button-secondary">Load Latest 5</button>
+                        <button id="load-students-btn" class="button button-secondary">Show All Students</button>
+                    </div>
+                    <div id="recent-subscriptions" class="recent-container"></div>
+                    <div id="students-list" class="students-container"></div>
                 </div>
                 
                 <!-- Testing Tools -->
@@ -614,5 +627,39 @@ class TestingInterface {
             ),
             'stats' => $stats
         ]);
+    }
+    
+    /**
+     * AJAX: Load recent subscriptions
+     */
+    public function ajaxLoadRecentSubscriptions(): void {
+        check_ajax_referer('subscription_tracker_nonce', 'nonce');
+        
+        if (!current_user_can('manage_options')) {
+            wp_send_json_error('Insufficient permissions');
+            return;
+        }
+        
+        $subscription_manager = new SubscriptionManager();
+        $subscriptions = $subscription_manager->getRecentSubscriptions(5);
+        
+        wp_send_json_success($subscriptions);
+    }
+    
+    /**
+     * AJAX: Load students
+     */
+    public function ajaxLoadStudents(): void {
+        check_ajax_referer('subscription_tracker_nonce', 'nonce');
+        
+        if (!current_user_can('manage_options')) {
+            wp_send_json_error('Insufficient permissions');
+            return;
+        }
+        
+        $subscription_manager = new SubscriptionManager();
+        $students = $subscription_manager->getAllStudents();
+        
+        wp_send_json_success($students);
     }
 }
