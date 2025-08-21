@@ -1712,6 +1712,7 @@ new WC_LearnDash_Access_Manager();
 /**
  * Helper function to check if user has access to course
  */
+if (!function_exists('wc_learndash_user_has_course_access')) {
 function wc_learndash_user_has_course_access($user_id, $course_id) {
     $expire_key = "course_{$course_id}_access_expires";
     $expires = get_user_meta($user_id, $expire_key, true);
@@ -1722,13 +1723,16 @@ function wc_learndash_user_has_course_access($user_id, $course_id) {
     
     return $expires > current_time('timestamp');
 }
+}
 
 /**
  * Helper function to get user's course access end date
  */
+if (!function_exists('wc_learndash_get_course_access_end_date')) {
 function wc_learndash_get_course_access_end_date($user_id, $course_id) {
     $expire_key = "course_{$course_id}_access_expires";
     return get_user_meta($user_id, $expire_key, true);
+}
 }
 
 /**

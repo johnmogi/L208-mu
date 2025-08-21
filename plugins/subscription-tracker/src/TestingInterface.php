@@ -22,9 +22,11 @@ class TestingInterface {
         add_action('wp_ajax_st_get_statistics', [$this, 'ajaxGetStatistics']);
         add_action('wp_ajax_st_search_users', [$this, 'ajaxSearchUsers']);
         add_action('wp_ajax_st_get_courses', [$this, 'ajaxGetCourses']);
-        add_action('wp_ajax_st_test_revoke_access', [$this, 'ajaxTestRevokeAccess']);
-        add_action('wp_ajax_st_test_import_subscriptions', [$this, 'ajaxTestImportSubscriptions']);
-        add_action('wp_ajax_st_load_recent_subscriptions', [$this, 'ajaxLoadRecentSubscriptions']);
+        add_action('wp_ajax_st_revoke_access', array($this, 'ajax_revoke_access'));
+        add_action('wp_ajax_st_import_subscriptions', array($this, 'ajax_import_subscriptions'));
+        add_action('wp_ajax_st_revoke_all_user_access', array($this, 'ajax_revoke_all_user_access'));
+        add_action('wp_ajax_st_save_course_product_link', array($this, 'ajax_save_course_product_link'));
+        add_action('wp_ajax_st_remove_course_product_link', array($this, 'ajax_remove_course_product_link'));
         add_action('wp_ajax_st_load_students', [$this, 'ajaxLoadStudents']);
     }
     
@@ -62,16 +64,24 @@ class TestingInterface {
                     </div>
                 </div>
                 
+                <!-- Product Links Management - Moved to top for visibility -->
+                <div class="product-links-main-section">
+                    <h2>🔗 נהל קישורי מוצרים לקורסים</h2>
+                    <p class="section-description">קשר בין קורסי LearnDash למוצרי WooCommerce לצורך רכישה מחדש</p>
+                    <button type="button" id="manage-product-links" class="button button-primary button-large">🔗 פתח ניהול קישורי מוצרים</button>
+                </div>
+                
                 <!-- Recent Subscriptions -->
                 <div class="recent-section">
-                    <h2>🕒 Recent Subscriptions</h2>
+                    <h2>🕒 Recent Subscriptions & Students</h2>
                     <div class="recent-controls">
-                        <button id="load-recent-btn" class="button button-secondary">Load Latest 5</button>
-                        <button id="load-students-btn" class="button button-secondary">Show All Students</button>
+                        <button type="button" id="load-recent-subscriptions" class="button">📅 הצג 5 המנויים האחרונים</button>
+                        <button type="button" id="load-students-list" class="button">👥 הצג רשימת תלמידים</button>
                     </div>
-                    <div id="recent-subscriptions" class="recent-container"></div>
-                    <div id="students-list" class="students-container"></div>
+                    <div id="recent-subscriptions-container" style="display: none;"></div>
+                    <div id="students-list-container" style="display: none;"></div>
                 </div>
+                <div id="product-links-container" style="display: none;"></div>
                 
                 <!-- Testing Tools -->
                 <div class="testing-section">
