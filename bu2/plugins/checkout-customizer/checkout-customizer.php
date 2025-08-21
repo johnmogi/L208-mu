@@ -33,5 +33,6 @@ spl_autoload_register(function ($class) {
 
 // Initialize the plugin - V2 cache bypass
 add_action('plugins_loaded', function() {
+    error_log('CheckoutCustomizer: Initializing plugin');
     new Lilac\CheckoutCustomizer\CheckoutCustomizer();
 }, 5);

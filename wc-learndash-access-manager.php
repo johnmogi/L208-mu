@@ -71,9 +71,9 @@ class WC_LearnDash_Access_Manager {
         add_action('woocommerce_product_options_general_product_data', [$this, 'add_custom_fields']);
         add_action('woocommerce_process_product_meta', [$this, 'save_custom_fields']);
         
-        // Remove duplicate hooks that cause multiple processing
-        // add_action('woocommerce_order_status_completed', [$this, 'handle_order_completion']);
-        // add_action('woocommerce_payment_complete', [$this, 'handle_payment_completion']);
+        // Main order processing hooks
+        add_action('woocommerce_order_status_completed', [$this, 'handle_order_completion']);
+        add_action('woocommerce_payment_complete', [$this, 'handle_payment_completion']);
         
         // Handle post-purchase redirection
         add_action('woocommerce_thankyou', [$this, 'handle_post_purchase_redirect'], 10, 1);

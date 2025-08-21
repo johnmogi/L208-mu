@@ -28,11 +28,14 @@ class CheckoutCustomizer {
         // Create user and associate with order BEFORE other hooks run - V2 cache bypass
         add_action('woocommerce_checkout_order_processed', [$this, 'create_user_and_associate_order_v2'], 1);
         
-        // DISABLED: Auto-login hooks to prevent conflicts with auto-login-after-checkout.php
-        // add_action('woocommerce_order_status_completed', [$this, 'auto_login_after_purchase'], 5);
-        // add_action('woocommerce_payment_complete', [$this, 'auto_login_after_purchase'], 5);
-        // add_action('woocommerce_order_status_processing', [$this, 'auto_login_after_purchase'], 5);
-        // add_action('woocommerce_order_status_on-hold', [$this, 'auto_login_after_purchase'], 5);
+        // Auto-login hooks enabled for immediate login after purchase
+        add_action('woocommerce_order_status_completed', [$this, 'auto_login_after_purchase'], 5);
+        add_action('woocommerce_payment_complete', [$this, 'auto_login_after_purchase'], 5);
+        add_action('woocommerce_order_status_processing', [$this, 'auto_login_after_purchase'], 5);
+        add_action('woocommerce_order_status_on-hold', [$this, 'auto_login_after_purchase'], 5);
+        
+        // Debug logging
+        error_log('CheckoutCustomizer: Auto-login hooks registered');
         
         // Enqueue scripts and styles
         add_action('wp_enqueue_scripts', [$this, 'enqueue_assets']);
@@ -358,6 +361,8 @@ class CheckoutCustomizer {
      * Auto-login after purchase
      */
     public function auto_login_after_purchase($order_id) {
+        error_log('=== AUTO LOGIN HOOK TRIGGERED ===');
+        error_log('Order ID: ' . $order_id);
         error_log('=== AUTO-LOGIN DEBUG START ===');
         error_log('Auto-login: Hook triggered with order ID: ' . $order_id);
         
